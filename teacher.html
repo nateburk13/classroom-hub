@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Classroom Hub — Teacher</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Roboto+Slab:wght@500;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+</head>
+<body>
+
+<div id="gate" class="gate"></div>
+
+<div id="app" class="app hidden">
+  <div class="sidebar">
+    <div class="brand">
+      <div class="mark">CH</div>
+      <h1>Classroom Hub</h1>
+    </div>
+    <button class="nav-btn active" data-view="dashboard"><span>Dashboard</span></button>
+    <button class="nav-btn" data-view="assignments"><span>Assignments</span></button>
+    <button class="nav-btn" data-view="announcements"><span>Announcements</span></button>
+
+    <div class="class-code-box">
+      <label>Class join code</label>
+      <div class="code" id="class-code-display">——————</div>
+      <div class="sync-dot"><span class="dot" id="sync-dot"></span><span id="sync-label">Connecting…</span></div>
+      <button class="btn small" id="btn-leave-class" style="width:100%;margin-top:10px;">Stop managing here</button>
+    </div>
+  </div>
+
+  <div class="main">
+    <div class="topbar">
+      <div>
+        <h2 id="view-title">Dashboard</h2>
+        <p id="view-subtitle">A snapshot of what's happening in your class.</p>
+      </div>
+      <div class="who">
+        <div class="avatar" id="who-avatar">T</div>
+        <div><span id="who-name">Teacher</span><small>Teacher</small></div>
+      </div>
+    </div>
+    <div id="view-root"></div>
+  </div>
+</div>
+
+<script src="firebase-config.js"></script>
+<script src="teacher.js"></script>
+</body>
+</html>

@@ -1,0 +1,91 @@
+/* ============================= DESIGN TOKENS ============================= */
+:root{
+  --forest:#1F3A2E;
+  --forest-light:#2B4F3E;
+  --cream:#F5F0E6;
+  --paper:#FFFFFF;
+  --amber:#E8A33D;
+  --amber-dark:#B87A1F;
+  --slate:#5C6B66;
+  --slate-light:#8B9A94;
+  --coral:#C1502E;
+  --green-ok:#3B6D40;
+  --line:#D8D2C2;
+  --radius:10px;
+  --shadow:0 1px 2px rgba(31,58,46,0.08);
+  font-family:'Inter',sans-serif;
+}
+*{box-sizing:border-box;}
+body{margin:0;background:var(--cream);color:var(--forest);min-height:100vh;}
+h1,h2,h3{font-family:'Roboto Slab',serif;font-weight:700;margin:0;}
+.mono{font-family:'JetBrains Mono',monospace;}
+
+/* ============================= LAYOUT ============================= */
+.app{display:flex;min-height:100vh;}
+.sidebar{width:220px;background:var(--forest);color:var(--cream);padding:20px 14px;display:flex;flex-direction:column;gap:4px;flex-shrink:0;}
+.brand{display:flex;align-items:center;gap:8px;margin-bottom:22px;padding:0 6px;}
+.brand .mark{width:28px;height:28px;background:var(--amber);border-radius:6px;display:flex;align-items:center;justify-content:center;color:var(--forest);font-family:'Roboto Slab',serif;font-weight:700;}
+.brand h1{font-size:16px;color:var(--cream);}
+.nav-btn{background:none;border:none;text-align:left;color:var(--cream);opacity:0.75;padding:10px 12px;border-radius:8px;font-size:14px;font-weight:500;cursor:pointer;display:flex;align-items:center;gap:10px;}
+.nav-btn:hover{opacity:1;background:var(--forest-light);}
+.nav-btn.active{opacity:1;background:var(--forest-light);color:var(--amber);}
+.class-code-box{margin-top:auto;background:var(--forest-light);border-radius:10px;padding:12px;}
+.class-code-box label{display:block;color:var(--slate-light);margin-bottom:6px;letter-spacing:.03em;text-transform:uppercase;font-size:10px;}
+.class-code-box .code{font-family:'JetBrains Mono',monospace;font-size:18px;font-weight:700;color:var(--amber);letter-spacing:.08em;}
+.sync-dot{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--slate-light);margin-top:10px;}
+.sync-dot .dot{width:6px;height:6px;border-radius:50%;background:#5DCAA5;flex-shrink:0;}
+.sync-dot .dot.offline{background:var(--coral);}
+
+.main{flex:1;padding:28px 36px;max-width:980px;}
+.topbar{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:24px;}
+.topbar h2{font-size:22px;}
+.topbar p{margin:4px 0 0;color:var(--slate);font-size:13px;}
+.who{display:flex;align-items:center;gap:10px;background:var(--paper);border:0.5px solid var(--line);padding:8px 12px;border-radius:var(--radius);}
+.who .avatar{width:30px;height:30px;border-radius:50%;background:var(--amber);color:var(--forest);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;}
+.who span{font-size:13px;font-weight:600;}
+.who small{display:block;color:var(--slate);font-weight:400;font-size:11px;}
+
+/* ============================= CARDS ============================= */
+.card{background:var(--paper);border:0.5px solid var(--line);border-radius:12px;padding:18px 20px;margin-bottom:14px;box-shadow:var(--shadow);}
+.card-row{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;}
+.card h3{font-size:15px;margin-bottom:4px;}
+.card .meta{font-size:12px;color:var(--slate);}
+.card .body-text{font-size:13px;color:var(--forest);margin-top:8px;line-height:1.5;}
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+.empty{text-align:center;padding:40px 20px;color:var(--slate);border:1px dashed var(--line);border-radius:12px;background:rgba(255,255,255,0.4);}
+.empty h3{color:var(--forest);font-size:15px;margin-bottom:6px;}
+.empty p{font-size:13px;margin:0 0 14px;}
+
+/* stamp badge — signature element, a rubber-stamped ledger mark */
+.stamp{display:inline-block;font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;padding:4px 9px;border-radius:3px;border:1.5px solid currentColor;transform:rotate(-3deg);white-space:nowrap;}
+.stamp.assigned{color:var(--amber-dark);}
+.stamp.submitted{color:var(--forest);}
+.stamp.overdue{color:var(--coral);}
+
+/* ============================= FORMS ============================= */
+input,textarea,select{width:100%;font-family:'Inter',sans-serif;font-size:13px;padding:9px 11px;border:0.5px solid var(--line);border-radius:8px;background:var(--paper);color:var(--forest);}
+input:focus,textarea:focus,select:focus{outline:2px solid var(--amber);outline-offset:1px;}
+label{font-size:12px;font-weight:600;color:var(--slate);display:block;margin-bottom:5px;}
+.field{margin-bottom:12px;}
+button.btn{font-family:'Inter',sans-serif;font-size:13px;font-weight:600;padding:9px 16px;border-radius:8px;border:0.5px solid var(--line);background:var(--paper);color:var(--forest);cursor:pointer;}
+button.btn:hover{background:var(--cream);}
+button.btn.primary{background:var(--amber);border-color:var(--amber-dark);color:var(--forest);}
+button.btn.primary:hover{background:var(--amber-dark);color:var(--cream);}
+button.btn.danger{color:var(--coral);}
+button.btn.small{padding:6px 10px;font-size:12px;}
+.form-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:6px;}
+
+/* ============================= MISC ============================= */
+.section-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;}
+.modal-bg{position:fixed;inset:0;background:rgba(31,58,46,0.35);display:flex;align-items:center;justify-content:center;z-index:50;}
+.modal{background:var(--paper);border-radius:14px;padding:22px 24px;width:420px;max-width:90vw;box-shadow:0 8px 30px rgba(0,0,0,0.2);}
+.modal h3{margin-bottom:14px;font-size:16px;}
+.hidden{display:none !important;}
+
+/* ============================= GATE SCREEN (create/join) ============================= */
+.gate{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;}
+.gate-card{background:var(--paper);border:0.5px solid var(--line);border-radius:16px;padding:32px;width:380px;max-width:100%;box-shadow:var(--shadow);}
+.gate-card .mark{width:40px;height:40px;background:var(--amber);border-radius:8px;display:flex;align-items:center;justify-content:center;color:var(--forest);font-family:'Roboto Slab',serif;font-weight:700;margin-bottom:14px;}
+.gate-card h2{font-size:20px;margin-bottom:4px;}
+.gate-card p{font-size:13px;color:var(--slate);margin:0 0 20px;}
+.gate-error{color:var(--coral);font-size:12px;margin-top:8px;min-height:16px;}
