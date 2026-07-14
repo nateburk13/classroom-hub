@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Classroom Hub</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Roboto+Slab:wght@500;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+<style>
+  .landing{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;}
+  .landing-card{background:var(--paper);border:0.5px solid var(--line);border-radius:16px;padding:40px;width:440px;max-width:100%;box-shadow:var(--shadow);text-align:center;}
+  .landing-card .mark{width:48px;height:48px;background:var(--amber);border-radius:10px;display:flex;align-items:center;justify-content:center;color:var(--forest);font-family:'Roboto Slab',serif;font-weight:700;font-size:18px;margin:0 auto 16px;}
+  .landing-card h1{font-size:24px;margin-bottom:6px;}
+  .landing-card p{font-size:13px;color:var(--slate);margin:0 0 28px;}
+  .landing-links{display:flex;flex-direction:column;gap:12px;}
+  .landing-link{display:block;text-decoration:none;background:var(--cream);border:0.5px solid var(--line);border-radius:10px;padding:16px 18px;text-align:left;transition:background 0.15s;}
+  .landing-link:hover{background:#EFE8D8;}
+  .landing-link.primary{background:var(--amber);border-color:var(--amber-dark);}
+  .landing-link.primary:hover{background:var(--amber-dark);}
+  .landing-link .role{font-family:'Roboto Slab',serif;font-weight:700;font-size:15px;color:var(--forest);margin-bottom:2px;}
+  .landing-link .desc{font-size:12px;color:var(--slate);}
+  .landing-link.primary .desc{color:var(--forest-light);}
+</style>
+</head>
+<body>
+  <div class="landing">
+    <div class="landing-card">
+      <div class="mark">CH</div>
+      <h1>Classroom Hub</h1>
+      <p>Choose how you're using this class.</p>
+      <div class="landing-links">
+        <a class="landing-link primary" href="teacher.html">
+          <div class="role">I'm the teacher</div>
+          <div class="desc">Create a class, post assignments and announcements, review submissions</div>
+        </a>
+        <a class="landing-link" href="student.html">
+          <div class="role">I'm a student</div>
+          <div class="desc">Join with a class code, see assignments, submit work</div>
+        </a>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
