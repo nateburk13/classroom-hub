@@ -10,6 +10,8 @@
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";</script>
 </head>
 <body>
 
@@ -25,6 +27,7 @@
     <button class="nav-btn" data-view="assignments"><span>Assignments</span></button>
     <button class="nav-btn" data-view="announcements"><span>Announcements</span></button>
     <button class="nav-btn" data-view="quizzes"><span>Quizzes</span></button>
+    <button class="nav-btn" data-view="books"><span>Book</span></button>
 
     <div class="class-code-box">
       <label>Class join code</label>

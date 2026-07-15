@@ -58,10 +58,11 @@ let currentView = 'dashboard';
 let assignments = [];
 let announcements = [];
 let quizzes = [];
+let books = [];
 let mySubmissions = {}; // assignmentId -> { text, submittedAt }
 let myQuizResponses = {}; // quizId -> { studentName, answers: { questionId: { attempts:[], solved } } }
 let selectedMcAnswer = {}; // "quizId-questionId" -> chosen option text (before submit)
-let loaded = { assignments: false, announcements: false, quizzes: false };
+let loaded = { assignments: false, announcements: false, quizzes: false, books: false };
 
 function studentDocId(){
   // stable, readable doc id derived from the student's name
@@ -109,6 +110,15 @@ function startApp(id, info, name){
       render();
       markSynced(true);
     }, ()=> markSynced(false));
+
+  db.collection('classes').doc(classId).collection('books')
+    .onSnapshot((snap)=>{
+      books = snap.docs.map(d=>({ id:d.id, ...d.data() }))
+        .sort((a,b)=> tsVal(b.createdAt)-tsVal(a.createdAt));
+      loaded.books = true;
+      render();
+      markSynced(true);
+    }, ()=> markSynced(false));
 }
 
 function markSynced(ok){
@@ -123,7 +133,7 @@ const viewRoot = document.getElementById('view-root');
 
 function render(){
   document.querySelectorAll('.nav-btn').forEach(b=> b.classList.toggle('active', b.dataset.view === currentView));
-  const renderers = { dashboard: renderDashboard, assignments: renderAssignments, announcements: renderAnnouncements, quizzes: renderQuizzes };
+  const renderers = { dashboard: renderDashboard, assignments: renderAssignments, announcements: renderAnnouncements, quizzes: renderQuizzes, books: renderBooks };
   (renderers[currentView] || renderDashboard)();
 }
 
@@ -218,6 +228,32 @@ function renderAnnouncements(){
     </div>`;
   });
   viewRoot.innerHTML = html;
+}
+
+function renderBooks(){
+  setHeader('Book', 'Read materials your teacher has posted.');
+  if(!loaded.books){
+    viewRoot.innerHTML = `<div class="empty"><h3>Loading books…</h3><p>Connecting to your class.</p></div>`;
+    return;
+  }
+  if(books.length === 0){
+    viewRoot.innerHTML = `<div class="empty"><h3>No book materials yet</h3><p>Check back once your teacher posts one.</p></div>`;
+    return;
+  }
+  let html = '';
+  books.forEach(b=>{
+    html += `<div class="card">
+      <div class="card-row">
+        <div>
+          <h3>${escapeHtml(b.title)}</h3>
+          <div class="meta">${b.pageCount} page${b.pageCount===1?'':'s'}${b.toc && b.toc.length ? ` · ${b.toc.length} chapter${b.toc.length===1?'':'s'}` : ''}</div>
+        </div>
+      </div>
+      <div class="form-actions"><button class="btn primary small" data-book-open="${b.id}">Open book</button></div>
+    </div>`;
+  });
+  viewRoot.innerHTML = html;
+  viewRoot.querySelectorAll('[data-book-open]').forEach(b=> b.onclick = ()=> openBookViewer(b.dataset.bookOpen));
 }
 
 function renderQuizzes(){
@@ -354,10 +390,10 @@ function statusFor(a){
 }
 
 /* --------------------------- 5. MODALS --------------------------- */
-function openModal(html){
+function openModal(html, extraClass){
   const bg = document.createElement('div');
   bg.className = 'modal-bg';
-  bg.innerHTML = `<div class="modal">${html}</div>`;
+  bg.innerHTML = `<div class="modal${extraClass ? ' ' + extraClass : ''}">${html}</div>`;
   bg.addEventListener('click', (e)=>{ if(e.target === bg) bg.remove(); });
   document.body.appendChild(bg);
   return bg;
@@ -392,6 +428,127 @@ function openSubmitModal(assignmentId){
       err.textContent = "Couldn't save — check your connection and try again.";
     }
   };
+}
+
+/* Full-screen book reader: table of contents, prev/next paging, zoom, and
+   personal bookmarks with notes. */
+async function openBookViewer(bookId){
+  const book = books.find(b=> b.id === bookId);
+  if(!book) return;
+  const ownerId = studentDocId();
+  const modal = openModal(`
+    <div class="book-viewer-head"><h3 style="margin:0;">${escapeHtml(book.title)}</h3><button class="btn small" id="bv-close">Close</button></div>
+    <div id="bv-body"><p class="meta">Loading pages…</p></div>
+  `, 'book-modal');
+  const keyHandler = (e)=>{
+    if(!document.body.contains(modal)){ document.removeEventListener('keydown', keyHandler); return; }
+    if(e.key === 'ArrowLeft') go(pageNum - 1);
+    if(e.key === 'ArrowRight') go(pageNum + 1);
+  };
+  document.addEventListener('keydown', keyHandler);
+  modal.querySelector('#bv-close').onclick = ()=>{ document.removeEventListener('keydown', keyHandler); modal.remove(); };
+
+  const bookmarksRef = db.collection('classes').doc(classId).collection('books').doc(bookId).collection('bookmarks').doc(ownerId);
+  const [pagesSnap, bmDoc] = await Promise.all([
+    db.collection('classes').doc(classId).collection('books').doc(bookId).collection('pages').orderBy('index').get(),
+    bookmarksRef.get()
+  ]);
+  const pages = pagesSnap.docs.map(d=> d.data());
+  if(pages.length === 0){
+    modal.querySelector('#bv-body').innerHTML = `<p class="meta">This book has no pages yet.</p>`;
+    return;
+  }
+
+  let pageNum = 1, zoom = 1;
+  let bookmarks = bmDoc.exists ? (bmDoc.data().items || []) : [];
+
+  async function saveBookmarks(){
+    try{
+      await bookmarksRef.set({ items: bookmarks, studentName });
+    }catch(e){
+      alert("Couldn't save your bookmarks — check your connection and try again.");
+    }
+  }
+
+  function openBookmarkEditor(page){
+    const existing = bookmarks.find(b=> b.page === page);
+    const mini = openModal(`
+      <h3>${existing ? 'Edit' : 'Add'} bookmark — page ${page}</h3>
+      <div class="field"><label>Note (optional)</label><textarea id="bm-note" rows="3" placeholder="What's here?">${existing ? escapeHtml(existing.note || '') : ''}</textarea></div>
+      <div class="form-actions">
+        ${existing ? '<button class="btn danger" id="bm-remove">Remove</button>' : ''}
+        <button class="btn" id="bm-cancel">Cancel</button>
+        <button class="btn primary" id="bm-save">${existing ? 'Save' : 'Add bookmark'}</button>
+      </div>
+    `);
+    mini.querySelector('#bm-cancel').onclick = ()=> mini.remove();
+    if(existing){
+      mini.querySelector('#bm-remove').onclick = async ()=>{
+        bookmarks = bookmarks.filter(b=> b.id !== existing.id);
+        await saveBookmarks();
+        mini.remove();
+        renderBody();
+      };
+    }
+    mini.querySelector('#bm-save').onclick = async ()=>{
+      const note = mini.querySelector('#bm-note').value.trim();
+      if(existing){ existing.note = note; }
+      else{ bookmarks.push({ id: 'bm' + Math.random().toString(36).slice(2,9), page, note, createdAt: Date.now() }); }
+      await saveBookmarks();
+      mini.remove();
+      renderBody();
+    };
+  }
+
+  function go(n){ pageNum = Math.max(1, Math.min(pages.length, n)); renderBody(); }
+  function setZoom(z){ zoom = Math.max(0.5, Math.min(3, Math.round(z*100)/100)); renderBody(); }
+
+  function renderBody(){
+    const toc = book.toc || [];
+    const sortedBookmarks = [...bookmarks].sort((a,b)=> a.page - b.page);
+    const isBookmarked = bookmarks.some(b=> b.page === pageNum);
+    const body = modal.querySelector('#bv-body');
+    body.innerHTML = `
+      <div class="book-viewer">
+        <div class="book-toc">
+          <div class="meta" style="margin-bottom:8px;font-weight:700;text-transform:uppercase;font-size:10px;letter-spacing:.04em;">Contents</div>
+          ${toc.length === 0 ? '<p class="book-empty-toc">No chapters added.</p>' : toc.map(t=> `<div class="book-toc-item" data-goto="${t.page}">${escapeHtml(t.title)}</div>`).join('')}
+          <div class="meta" style="margin:16px 0 8px;font-weight:700;text-transform:uppercase;font-size:10px;letter-spacing:.04em;">My bookmarks</div>
+          ${sortedBookmarks.length === 0 ? '<p class="book-empty-toc">No bookmarks yet.</p>' : sortedBookmarks.map(bm=> `
+            <div class="book-toc-item book-bookmark-item">
+              <div data-goto="${bm.page}"><strong>Page ${bm.page}</strong>${bm.note ? `<div class="meta" style="margin-top:2px;">${escapeHtml(bm.note)}</div>` : ''}</div>
+              <button class="btn small danger" data-edit-bm="${bm.page}">Edit</button>
+            </div>`).join('')}
+        </div>
+        <div class="book-page-area">
+          <div class="book-controls">
+            <button class="btn small" id="bv-prev">← Prev</button>
+            <span class="mono" style="font-size:12px;">Page <input id="bv-pagenum" type="number" min="1" max="${pages.length}" value="${pageNum}"> of ${pages.length}</span>
+            <button class="btn small" id="bv-next">Next →</button>
+            <button class="btn small" id="bv-bookmark">${isBookmarked ? '★ Bookmarked' : '☆ Bookmark this page'}</button>
+            <span style="flex:1;"></span>
+            <button class="btn small" id="bv-zoom-out">−</button>
+            <span class="meta mono" style="min-width:42px;text-align:center;">${Math.round(zoom*100)}%</span>
+            <button class="btn small" id="bv-zoom-in">+</button>
+            <button class="btn small" id="bv-zoom-reset">Reset</button>
+          </div>
+          <div class="book-page-wrap">
+            <img src="${pages[pageNum-1].dataUrl}" style="transform:scale(${zoom});" alt="Page ${pageNum}">
+          </div>
+        </div>
+      </div>`;
+    body.querySelector('#bv-prev').onclick = ()=> go(pageNum - 1);
+    body.querySelector('#bv-next').onclick = ()=> go(pageNum + 1);
+    body.querySelector('#bv-pagenum').onchange = (e)=> go(+e.target.value || 1);
+    body.querySelector('#bv-bookmark').onclick = ()=> openBookmarkEditor(pageNum);
+    body.querySelector('#bv-zoom-out').onclick = ()=> setZoom(zoom - 0.25);
+    body.querySelector('#bv-zoom-in').onclick = ()=> setZoom(zoom + 0.25);
+    body.querySelector('#bv-zoom-reset').onclick = ()=> setZoom(1);
+    body.querySelectorAll('[data-goto]').forEach(el=> el.onclick = ()=> go(+el.dataset.goto));
+    body.querySelectorAll('[data-edit-bm]').forEach(el=> el.onclick = ()=> openBookmarkEditor(+el.dataset.editBm));
+  }
+
+  renderBody();
 }
 
 /* --------------------------- 6. HELPERS --------------------------- */

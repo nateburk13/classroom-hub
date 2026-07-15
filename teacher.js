@@ -109,10 +109,12 @@ let currentView = 'dashboard';
 let unsubAssignments = null;
 let unsubAnnouncements = null;
 let unsubQuizzes = null;
+let unsubBooks = null;
 let assignments = [];
 let announcements = [];
 let quizzes = [];
-let loaded = { assignments: false, announcements: false, quizzes: false };
+let books = [];
+let loaded = { assignments: false, announcements: false, quizzes: false, books: false };
 
 function startApp(id, info){
   classId = id;
@@ -158,6 +160,15 @@ function startApp(id, info){
       render();
       markSynced(true);
     }, ()=> markSynced(false));
+
+  unsubBooks = db.collection('classes').doc(classId).collection('books')
+    .onSnapshot((snap)=>{
+      books = snap.docs.map(d=>({ id:d.id, ...d.data() }))
+        .sort((a,b)=> tsVal(b.createdAt)-tsVal(a.createdAt));
+      loaded.books = true;
+      render();
+      markSynced(true);
+    }, ()=> markSynced(false));
 }
 
 function markSynced(ok){
@@ -172,7 +183,7 @@ const viewRoot = document.getElementById('view-root');
 
 function render(){
   document.querySelectorAll('.nav-btn').forEach(b=> b.classList.toggle('active', b.dataset.view === currentView));
-  const renderers = { dashboard: renderDashboard, assignments: renderAssignments, announcements: renderAnnouncements, quizzes: renderQuizzes };
+  const renderers = { dashboard: renderDashboard, assignments: renderAssignments, announcements: renderAnnouncements, quizzes: renderQuizzes, books: renderBooks };
   (renderers[currentView] || renderDashboard)();
 }
 
@@ -327,6 +338,47 @@ function renderQuizzes(){
   viewRoot.querySelectorAll('[data-delete-quiz]').forEach(b=> b.onclick = ()=> deleteQuiz(b.dataset.deleteQuiz));
 }
 
+function renderBooks(){
+  setHeader('Book', 'Upload PDFs for your class to read, with chapters and page navigation.');
+  let html = `<div class="section-head"><div></div><button class="btn primary small" id="btn-new-book">Add book</button></div>`;
+
+  if(!loaded.books){
+    html += `<div class="empty"><h3>Loading books…</h3><p>Connecting to your class.</p></div>`;
+    viewRoot.innerHTML = html;
+    document.getElementById('btn-new-book').onclick = openBookUploadModal;
+    return;
+  }
+
+  if(books.length === 0){
+    html += `<div class="empty"><h3>No book materials yet</h3><p>Upload a PDF and students will be able to read it with page navigation and a table of contents.</p></div>`;
+    viewRoot.innerHTML = html;
+    document.getElementById('btn-new-book').onclick = openBookUploadModal;
+    return;
+  }
+
+  books.forEach(b=>{
+    html += `<div class="card">
+      <div class="card-row">
+        <div>
+          <h3>${escapeHtml(b.title)}</h3>
+          <div class="meta">${b.pageCount} page${b.pageCount===1?'':'s'}${b.toc && b.toc.length ? ` · ${b.toc.length} chapter${b.toc.length===1?'':'s'}` : ' · no chapters added'}</div>
+        </div>
+      </div>
+      <div class="form-actions">
+        <button class="btn small" data-book-view="${b.id}">Read</button>
+        <button class="btn small" data-book-toc="${b.id}">Edit chapters</button>
+        <button class="btn small danger" data-book-delete="${b.id}">Delete</button>
+      </div>
+    </div>`;
+  });
+
+  viewRoot.innerHTML = html;
+  document.getElementById('btn-new-book').onclick = openBookUploadModal;
+  viewRoot.querySelectorAll('[data-book-view]').forEach(b=> b.onclick = ()=> openBookViewer(b.dataset.bookView));
+  viewRoot.querySelectorAll('[data-book-toc]').forEach(b=> b.onclick = ()=> openBookTocModal(b.dataset.bookToc));
+  viewRoot.querySelectorAll('[data-book-delete]').forEach(b=> b.onclick = ()=> deleteBook(b.dataset.bookDelete));
+}
+
 /* --------------------------- 4. ACTIONS --------------------------- */
 function statusFor(assignment){
   const overdue = assignment.dueDate && new Date(assignment.dueDate) < new Date(new Date().toDateString());
@@ -355,6 +407,22 @@ async function deleteQuiz(id){
     await db.collection('classes').doc(classId).collection('quizzes').doc(id).delete();
   }catch(e){
     alert("Couldn't delete this quiz — check your connection and try again.");
+  }
+}
+async function deleteBook(id){
+  if(!confirm('Delete this book? It will be removed for all students.')) return;
+  try{
+    const pagesSnap = await db.collection('classes').doc(classId).collection('books').doc(id).collection('pages').get();
+    let batch = db.batch(), n = 0;
+    for(const d of pagesSnap.docs){
+      batch.delete(d.ref);
+      n++;
+      if(n >= 400){ await batch.commit(); batch = db.batch(); n = 0; }
+    }
+    if(n > 0) await batch.commit();
+    await db.collection('classes').doc(classId).collection('books').doc(id).delete();
+  }catch(e){
+    alert("Couldn't delete this book — check your connection and try again.");
   }
 }
 
@@ -722,6 +790,257 @@ async function openQuizResultsModal(quizId){
 
   const modal = openModal(`<h3>Results — ${escapeHtml(quiz.title)}</h3>${body}<div class="form-actions"><button class="btn" id="f-close">Close</button></div>`);
   modal.querySelector('#f-close').onclick = ()=> modal.remove();
+}
+
+/* Renders one PDF page to a compressed JPEG data-URL via pdf.js */
+async function pdfPageToDataUrl(pdf, pageNum, maxWidth){
+  const page = await pdf.getPage(pageNum);
+  const unscaled = page.getViewport({ scale: 1 });
+  const scale = maxWidth / unscaled.width;
+  const viewport = page.getViewport({ scale });
+  const canvas = document.createElement('canvas');
+  canvas.width = viewport.width;
+  canvas.height = viewport.height;
+  const ctx = canvas.getContext('2d');
+  await page.render({ canvasContext: ctx, viewport }).promise;
+  return canvas.toDataURL('image/jpeg', 0.72);
+}
+
+function openBookUploadModal(){
+  const modal = openModal(`
+    <h3>Add book material</h3>
+    <p class="meta" style="margin-bottom:14px;">Upload a PDF. Each page is converted to an image students can page through — no extra software needed.</p>
+    <div class="field"><label>Title</label><input id="bk-title" placeholder="Chapter 4 Reading — Photosynthesis"></div>
+    <div class="field"><label>PDF file</label><input id="bk-file" type="file" accept="application/pdf"></div>
+    <p class="meta" id="bk-status"></p>
+    <div class="form-actions"><button class="btn" id="f-cancel">Cancel</button><button class="btn primary" id="f-save">Upload</button></div>
+    <div class="gate-error" id="f-error"></div>
+  `, 'wide');
+  modal.querySelector('#f-cancel').onclick = ()=> modal.remove();
+  modal.querySelector('#f-save').onclick = async ()=>{
+    const title = modal.querySelector('#bk-title').value.trim();
+    const file = modal.querySelector('#bk-file').files[0];
+    const err = modal.querySelector('#f-error');
+    const status = modal.querySelector('#bk-status');
+    const saveBtn = modal.querySelector('#f-save');
+    err.textContent = '';
+    if(!title){ err.textContent = 'Give the book a title.'; return; }
+    if(!file){ err.textContent = 'Choose a PDF file.'; return; }
+    saveBtn.disabled = true;
+    let bookRef = null;
+    try{
+      status.textContent = 'Reading PDF…';
+      const buf = await file.arrayBuffer();
+      const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+      const pageCount = pdf.numPages;
+      if(pageCount > 300){
+        err.textContent = `This PDF has ${pageCount} pages — please keep books under 300 pages for now.`;
+        saveBtn.disabled = false;
+        status.textContent = '';
+        return;
+      }
+      bookRef = await db.collection('classes').doc(classId).collection('books').add({
+        title, pageCount, toc: [], createdAt: firebase.firestore.FieldValue.serverTimestamp()
+      });
+      let batch = db.batch();
+      let opsInBatch = 0;
+      for(let i = 1; i <= pageCount; i++){
+        status.textContent = `Processing page ${i} of ${pageCount}…`;
+        const dataUrl = await pdfPageToDataUrl(pdf, i, 1100);
+        batch.set(bookRef.collection('pages').doc(String(i).padStart(4,'0')), { index: i, dataUrl });
+        opsInBatch++;
+        if(opsInBatch >= 400){ await batch.commit(); batch = db.batch(); opsInBatch = 0; }
+      }
+      if(opsInBatch > 0) await batch.commit();
+      modal.remove();
+    }catch(e){
+      console.error(e);
+      // clean up a partially-created book so it doesn't show up empty
+      if(bookRef){ bookRef.delete().catch(()=>{}); }
+      err.textContent = "Couldn't process that PDF. Make sure it's a valid, unencrypted PDF file, then try again.";
+      saveBtn.disabled = false;
+      status.textContent = '';
+    }
+  };
+}
+
+function openBookTocModal(bookId){
+  const book = books.find(b=> b.id === bookId);
+  if(!book) return;
+  let toc = (book.toc || []).map(t=> ({ ...t }));
+
+  function rowsHtml(){
+    if(toc.length === 0) return `<p class="book-empty-toc">No chapters yet — add an entry below.</p>`;
+    return toc.map((t,i)=> `
+      <div class="qbuilder-row">
+        <button class="btn small danger remove-q" data-remove-toc="${i}">✕</button>
+        <div class="field"><label>Chapter / section title</label><input data-toc-title="${i}" value="${escapeHtml(t.title||'')}" placeholder="Chapter 2 — Cell Structure"></div>
+        <div class="field" style="max-width:160px;"><label>Starts on page</label><input type="number" min="1" max="${book.pageCount}" data-toc-page="${i}" value="${t.page || 1}"></div>
+      </div>`).join('');
+  }
+
+  const modal = openModal(`
+    <h3>Table of contents — ${escapeHtml(book.title)}</h3>
+    <p class="meta">Add entries so students can jump straight to a chapter or section.</p>
+    <div id="toc-rows">${rowsHtml()}</div>
+    <button class="btn small" id="toc-add" style="margin-bottom:10px;">Add entry</button>
+    <div class="form-actions"><button class="btn" id="f-cancel">Cancel</button><button class="btn primary" id="f-save">Save</button></div>
+    <div class="gate-error" id="f-error"></div>
+  `, 'wide');
+
+  function sync(){
+    modal.querySelectorAll('[data-toc-title]').forEach(inp=> toc[+inp.dataset.tocTitle].title = inp.value);
+    modal.querySelectorAll('[data-toc-page]').forEach(inp=> toc[+inp.dataset.tocPage].page = Math.max(1, Math.min(book.pageCount, +inp.value || 1)));
+  }
+  function wire(){
+    modal.querySelectorAll('[data-remove-toc]').forEach(btn=>{
+      btn.onclick = ()=>{ sync(); toc.splice(+btn.dataset.removeToc, 1); rerender(); };
+    });
+  }
+  function rerender(){
+    modal.querySelector('#toc-rows').innerHTML = rowsHtml();
+    wire();
+  }
+  wire();
+
+  modal.querySelector('#toc-add').onclick = ()=>{ sync(); toc.push({ title:'', page:1 }); rerender(); };
+  modal.querySelector('#f-cancel').onclick = ()=> modal.remove();
+  modal.querySelector('#f-save').onclick = async ()=>{
+    sync();
+    const clean = toc.filter(t=> t.title.trim() !== '').sort((a,b)=> a.page - b.page);
+    const saveBtn = modal.querySelector('#f-save');
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Saving…';
+    try{
+      await db.collection('classes').doc(classId).collection('books').doc(bookId).update({ toc: clean });
+      modal.remove();
+    }catch(e){
+      saveBtn.disabled = false;
+      saveBtn.textContent = 'Save';
+      modal.querySelector('#f-error').textContent = "Couldn't save — check your connection and try again.";
+    }
+  };
+}
+
+/* Full-screen book reader: table of contents, prev/next paging, zoom, and
+   personal bookmarks with notes. Shared shape between teacher and student. */
+async function openBookViewer(bookId){
+  const book = books.find(b=> b.id === bookId);
+  if(!book) return;
+  const ownerId = 'teacher'; // one teacher identity per class for bookmarks
+  const modal = openModal(`
+    <div class="book-viewer-head"><h3 style="margin:0;">${escapeHtml(book.title)}</h3><button class="btn small" id="bv-close">Close</button></div>
+    <div id="bv-body"><p class="meta">Loading pages…</p></div>
+  `, 'book-modal');
+  const keyHandler = (e)=>{
+    if(!document.body.contains(modal)){ document.removeEventListener('keydown', keyHandler); return; }
+    if(e.key === 'ArrowLeft') go(pageNum - 1);
+    if(e.key === 'ArrowRight') go(pageNum + 1);
+  };
+  document.addEventListener('keydown', keyHandler);
+  modal.querySelector('#bv-close').onclick = ()=>{ document.removeEventListener('keydown', keyHandler); modal.remove(); };
+
+  const bookmarksRef = db.collection('classes').doc(classId).collection('books').doc(bookId).collection('bookmarks').doc(ownerId);
+  const [pagesSnap, bmDoc] = await Promise.all([
+    db.collection('classes').doc(classId).collection('books').doc(bookId).collection('pages').orderBy('index').get(),
+    bookmarksRef.get()
+  ]);
+  const pages = pagesSnap.docs.map(d=> d.data());
+  if(pages.length === 0){
+    modal.querySelector('#bv-body').innerHTML = `<p class="meta">This book has no pages yet.</p>`;
+    return;
+  }
+
+  let pageNum = 1, zoom = 1;
+  let bookmarks = bmDoc.exists ? (bmDoc.data().items || []) : [];
+
+  async function saveBookmarks(){
+    try{
+      await bookmarksRef.set({ items: bookmarks });
+    }catch(e){
+      alert("Couldn't save your bookmarks — check your connection and try again.");
+    }
+  }
+
+  function openBookmarkEditor(page){
+    const existing = bookmarks.find(b=> b.page === page);
+    const mini = openModal(`
+      <h3>${existing ? 'Edit' : 'Add'} bookmark — page ${page}</h3>
+      <div class="field"><label>Note (optional)</label><textarea id="bm-note" rows="3" placeholder="What's here?">${existing ? escapeHtml(existing.note || '') : ''}</textarea></div>
+      <div class="form-actions">
+        ${existing ? '<button class="btn danger" id="bm-remove">Remove</button>' : ''}
+        <button class="btn" id="bm-cancel">Cancel</button>
+        <button class="btn primary" id="bm-save">${existing ? 'Save' : 'Add bookmark'}</button>
+      </div>
+    `);
+    mini.querySelector('#bm-cancel').onclick = ()=> mini.remove();
+    if(existing){
+      mini.querySelector('#bm-remove').onclick = async ()=>{
+        bookmarks = bookmarks.filter(b=> b.id !== existing.id);
+        await saveBookmarks();
+        mini.remove();
+        renderBody();
+      };
+    }
+    mini.querySelector('#bm-save').onclick = async ()=>{
+      const note = mini.querySelector('#bm-note').value.trim();
+      if(existing){ existing.note = note; }
+      else{ bookmarks.push({ id: 'bm' + Math.random().toString(36).slice(2,9), page, note, createdAt: Date.now() }); }
+      await saveBookmarks();
+      mini.remove();
+      renderBody();
+    };
+  }
+
+  function go(n){ pageNum = Math.max(1, Math.min(pages.length, n)); renderBody(); }
+  function setZoom(z){ zoom = Math.max(0.5, Math.min(3, Math.round(z*100)/100)); renderBody(); }
+
+  function renderBody(){
+    const toc = book.toc || [];
+    const sortedBookmarks = [...bookmarks].sort((a,b)=> a.page - b.page);
+    const isBookmarked = bookmarks.some(b=> b.page === pageNum);
+    const body = modal.querySelector('#bv-body');
+    body.innerHTML = `
+      <div class="book-viewer">
+        <div class="book-toc">
+          <div class="meta" style="margin-bottom:8px;font-weight:700;text-transform:uppercase;font-size:10px;letter-spacing:.04em;">Contents</div>
+          ${toc.length === 0 ? '<p class="book-empty-toc">No chapters added.</p>' : toc.map(t=> `<div class="book-toc-item" data-goto="${t.page}">${escapeHtml(t.title)}</div>`).join('')}
+          <div class="meta" style="margin:16px 0 8px;font-weight:700;text-transform:uppercase;font-size:10px;letter-spacing:.04em;">Bookmarks</div>
+          ${sortedBookmarks.length === 0 ? '<p class="book-empty-toc">No bookmarks yet.</p>' : sortedBookmarks.map(bm=> `
+            <div class="book-toc-item book-bookmark-item">
+              <div data-goto="${bm.page}"><strong>Page ${bm.page}</strong>${bm.note ? `<div class="meta" style="margin-top:2px;">${escapeHtml(bm.note)}</div>` : ''}</div>
+              <button class="btn small danger" data-edit-bm="${bm.page}">Edit</button>
+            </div>`).join('')}
+        </div>
+        <div class="book-page-area">
+          <div class="book-controls">
+            <button class="btn small" id="bv-prev">← Prev</button>
+            <span class="mono" style="font-size:12px;">Page <input id="bv-pagenum" type="number" min="1" max="${pages.length}" value="${pageNum}"> of ${pages.length}</span>
+            <button class="btn small" id="bv-next">Next →</button>
+            <button class="btn small" id="bv-bookmark">${isBookmarked ? '★ Bookmarked' : '☆ Bookmark this page'}</button>
+            <span style="flex:1;"></span>
+            <button class="btn small" id="bv-zoom-out">−</button>
+            <span class="meta mono" style="min-width:42px;text-align:center;">${Math.round(zoom*100)}%</span>
+            <button class="btn small" id="bv-zoom-in">+</button>
+            <button class="btn small" id="bv-zoom-reset">Reset</button>
+          </div>
+          <div class="book-page-wrap">
+            <img src="${pages[pageNum-1].dataUrl}" style="transform:scale(${zoom});" alt="Page ${pageNum}">
+          </div>
+        </div>
+      </div>`;
+    body.querySelector('#bv-prev').onclick = ()=> go(pageNum - 1);
+    body.querySelector('#bv-next').onclick = ()=> go(pageNum + 1);
+    body.querySelector('#bv-pagenum').onchange = (e)=> go(+e.target.value || 1);
+    body.querySelector('#bv-bookmark').onclick = ()=> openBookmarkEditor(pageNum);
+    body.querySelector('#bv-zoom-out').onclick = ()=> setZoom(zoom - 0.25);
+    body.querySelector('#bv-zoom-in').onclick = ()=> setZoom(zoom + 0.25);
+    body.querySelector('#bv-zoom-reset').onclick = ()=> setZoom(1);
+    body.querySelectorAll('[data-goto]').forEach(el=> el.onclick = ()=> go(+el.dataset.goto));
+    body.querySelectorAll('[data-edit-bm]').forEach(el=> el.onclick = ()=> openBookmarkEditor(+el.dataset.editBm));
+  }
+
+  renderBody();
 }
 
 /* --------------------------- 6. HELPERS --------------------------- */

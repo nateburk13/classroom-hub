@@ -97,6 +97,23 @@ button.btn.small{padding:6px 10px;font-size:12px;}
 .qbuilder-row .remove-q{position:absolute;top:10px;right:10px;}
 .qbuilder-row .opt-input{margin-bottom:6px;}
 
+/* ============================= BOOK VIEWER ============================= */
+.book-modal{width:920px;}
+.book-viewer-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;}
+.book-viewer{display:flex;gap:16px;}
+.book-toc{width:190px;flex-shrink:0;max-height:66vh;overflow-y:auto;border-right:0.5px solid var(--line);padding-right:12px;}
+.book-toc-item{font-size:12px;padding:8px 6px;border-radius:6px;cursor:pointer;color:var(--forest);line-height:1.4;}
+.book-toc-item:hover{background:var(--cream);}
+.book-bookmark-item{display:flex;justify-content:space-between;align-items:flex-start;gap:6px;padding-right:0;}
+.book-bookmark-item > div{flex:1;cursor:pointer;}
+.book-bookmark-item button{padding:2px 7px;font-size:11px;flex-shrink:0;}
+.book-page-area{flex:1;display:flex;flex-direction:column;min-width:0;}
+.book-controls{display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap;}
+.book-controls input[type="number"]{width:56px;display:inline-block;padding:4px 6px;text-align:center;}
+.book-page-wrap{flex:1;overflow:auto;border:0.5px solid var(--line);border-radius:8px;background:var(--cream);text-align:center;padding:16px;min-height:60vh;}
+.book-page-wrap img{max-width:100%;transform-origin:top center;box-shadow:0 2px 10px rgba(0,0,0,0.12);border-radius:2px;}
+.book-empty-toc{font-size:12px;color:var(--slate);}
+
 /* ============================= GATE SCREEN (create/join) ============================= */
 .gate{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;}
 .gate-card{background:var(--paper);border:0.5px solid var(--line);border-radius:16px;padding:32px;width:380px;max-width:100%;box-shadow:var(--shadow);}
@@ -190,4 +207,10 @@ button.btn.small{padding:6px 10px;font-size:12px;}
   table.scroll-table{white-space:nowrap;}
 
   .quiz-q img{max-height:180px;}
+
+  .book-modal, .book-modal.wide{width:100%;}
+  .book-viewer{flex-direction:column;}
+  .book-toc{width:100%;max-height:110px;border-right:none;border-bottom:0.5px solid var(--line);padding-right:0;padding-bottom:8px;margin-bottom:8px;}
+  .book-page-wrap{min-height:50vh;padding:10px;}
+  .book-controls{gap:6px;}
 }
