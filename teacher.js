@@ -828,10 +828,19 @@ function openBookUploadModal(){
     if(!file){ err.textContent = 'Choose a PDF file.'; return; }
     saveBtn.disabled = true;
     let bookRef = null;
+    let stage = 'reading';
     try{
       status.textContent = 'Reading PDF…';
       const buf = await file.arrayBuffer();
-      const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+      const pdf = await pdfjsLib.getDocument({
+        data: buf,
+        // These let pdf.js handle PDFs with embedded/CJK fonts and non-standard
+        // fonts instead of throwing — without them, plenty of ordinary PDFs fail.
+        cMapUrl: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/cmaps/',
+        cMapPacked: true,
+        standardFontDataUrl: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/standard_fonts/',
+        stopAtErrors: false // keep going instead of aborting on a single malformed object
+      }).promise;
       const pageCount = pdf.numPages;
       if(pageCount > 300){
         err.textContent = `This PDF has ${pageCount} pages — please keep books under 300 pages for now.`;
@@ -839,25 +848,40 @@ function openBookUploadModal(){
         status.textContent = '';
         return;
       }
+      stage = 'saving';
       bookRef = await db.collection('classes').doc(classId).collection('books').add({
         title, pageCount, toc: [], createdAt: firebase.firestore.FieldValue.serverTimestamp()
       });
       let batch = db.batch();
       let opsInBatch = 0;
+      let pagesSaved = 0;
       for(let i = 1; i <= pageCount; i++){
         status.textContent = `Processing page ${i} of ${pageCount}…`;
-        const dataUrl = await pdfPageToDataUrl(pdf, i, 1100);
-        batch.set(bookRef.collection('pages').doc(String(i).padStart(4,'0')), { index: i, dataUrl });
-        opsInBatch++;
+        try{
+          const dataUrl = await pdfPageToDataUrl(pdf, i, 1100);
+          batch.set(bookRef.collection('pages').doc(String(i).padStart(4,'0')), { index: i, dataUrl });
+          opsInBatch++;
+          pagesSaved++;
+        }catch(pageErr){
+          // one bad page shouldn't sink the whole book — skip it and keep going
+          console.error(`Page ${i} failed to render:`, pageErr);
+        }
         if(opsInBatch >= 400){ await batch.commit(); batch = db.batch(); opsInBatch = 0; }
       }
       if(opsInBatch > 0) await batch.commit();
+      if(pagesSaved === 0){
+        stage = 'reading';
+        throw new Error('No pages could be rendered from this file.');
+      }
       modal.remove();
     }catch(e){
       console.error(e);
       // clean up a partially-created book so it doesn't show up empty
       if(bookRef){ bookRef.delete().catch(()=>{}); }
-      err.textContent = "Couldn't process that PDF. Make sure it's a valid, unencrypted PDF file, then try again.";
+      const reason = (e && e.message) ? e.message : 'Unknown error';
+      err.textContent = stage === 'saving'
+        ? `Couldn't save this book — check your connection and try again. (${reason})`
+        : `Couldn't read this PDF (${reason}). Try re-saving/exporting it and uploading again, or use a different file.`;
       saveBtn.disabled = false;
       status.textContent = '';
     }
