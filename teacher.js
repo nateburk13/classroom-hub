@@ -112,6 +112,7 @@ let unsubQuizzes = null;
 let assignments = [];
 let announcements = [];
 let quizzes = [];
+let loaded = { assignments: false, announcements: false, quizzes: false };
 
 function startApp(id, info){
   classId = id;
@@ -131,6 +132,7 @@ function startApp(id, info){
         a.submissionCount = subsSnap.size;
         assignments.push(a);
       }
+      loaded.assignments = true;
       render();
       markSynced(true);
     }, ()=> markSynced(false));
@@ -138,6 +140,7 @@ function startApp(id, info){
   unsubAnnouncements = db.collection('classes').doc(classId).collection('announcements')
     .onSnapshot((snap)=>{
       announcements = snap.docs.map(d=>({ id:d.id, ...d.data() }));
+      loaded.announcements = true;
       render();
       markSynced(true);
     }, ()=> markSynced(false));
@@ -151,6 +154,7 @@ function startApp(id, info){
         q.responseCount = respSnap.size;
         quizzes.push(q);
       }
+      loaded.quizzes = true;
       render();
       markSynced(true);
     }, ()=> markSynced(false));
@@ -184,7 +188,8 @@ function renderDashboard(){
 
   let html = `<div class="grid-2">`;
   html += `<div class="card"><h3>Upcoming assignments</h3>`;
-  if(upcoming.length === 0){ html += `<p class="meta">Nothing assigned yet.</p>`; }
+  if(!loaded.assignments){ html += `<p class="meta">Loading…</p>`; }
+  else if(upcoming.length === 0){ html += `<p class="meta">Nothing assigned yet.</p>`; }
   else{
     upcoming.forEach(a=>{
       const status = statusFor(a);
@@ -197,7 +202,8 @@ function renderDashboard(){
   html += `</div>`;
 
   html += `<div class="card"><h3>Latest announcement</h3>`;
-  if(!recentAnnouncement){ html += `<p class="meta">No announcements yet.</p>`; }
+  if(!loaded.announcements){ html += `<p class="meta">Loading…</p>`; }
+  else if(!recentAnnouncement){ html += `<p class="meta">No announcements yet.</p>`; }
   else{
     html += `<div style="font-weight:600;font-size:13px;">${escapeHtml(recentAnnouncement.title)}</div>
       <p class="body-text">${escapeHtml(recentAnnouncement.body)}</p>
@@ -216,6 +222,13 @@ function renderDashboard(){
 function renderAssignments(){
   setHeader('Assignments', 'Create and track assignments for your class.');
   let html = `<div class="section-head"><div></div><button class="btn primary small" id="btn-new-assignment">New assignment</button></div>`;
+
+  if(!loaded.assignments){
+    html += `<div class="empty"><h3>Loading assignments…</h3><p>Connecting to your class.</p></div>`;
+    viewRoot.innerHTML = html;
+    document.getElementById('btn-new-assignment').onclick = openAssignmentModal;
+    return;
+  }
 
   if(assignments.length === 0){
     html += `<div class="empty"><h3>No assignments yet</h3><p>Create your first assignment to get the class started.</p></div>`;
@@ -252,7 +265,9 @@ function renderAnnouncements(){
   setHeader('Announcements', 'Post updates for the whole class to see.');
   let html = `<div class="section-head"><div></div><button class="btn primary small" id="btn-new-announcement">New announcement</button></div>`;
 
-  if(announcements.length === 0){
+  if(!loaded.announcements){
+    html += `<div class="empty"><h3>Loading announcements…</h3><p>Connecting to your class.</p></div>`;
+  }else if(announcements.length === 0){
     html += `<div class="empty"><h3>No announcements yet</h3><p>Post an update to notify the class.</p></div>`;
   }else{
     [...announcements].sort((a,b)=> tsVal(b.postedAt)-tsVal(a.postedAt)).forEach(n=>{
@@ -276,6 +291,13 @@ function renderAnnouncements(){
 function renderQuizzes(){
   setHeader('Quizzes', 'Build quizzes and see how the class did.');
   let html = `<div class="section-head"><div></div><button class="btn primary small" id="btn-new-quiz">New quiz</button></div>`;
+
+  if(!loaded.quizzes){
+    html += `<div class="empty"><h3>Loading quizzes…</h3><p>Connecting to your class.</p></div>`;
+    viewRoot.innerHTML = html;
+    document.getElementById('btn-new-quiz').onclick = openQuizModal;
+    return;
+  }
 
   if(quizzes.length === 0){
     html += `<div class="empty"><h3>No quizzes yet</h3><p>Create a quiz with multiple choice or text questions.</p></div>`;
@@ -314,14 +336,26 @@ function statusFor(assignment){
 }
 
 async function deleteAssignment(id){
-  await db.collection('classes').doc(classId).collection('assignments').doc(id).delete();
+  try{
+    await db.collection('classes').doc(classId).collection('assignments').doc(id).delete();
+  }catch(e){
+    alert("Couldn't delete this assignment — check your connection and try again.");
+  }
 }
 async function deleteAnnouncement(id){
-  await db.collection('classes').doc(classId).collection('announcements').doc(id).delete();
+  try{
+    await db.collection('classes').doc(classId).collection('announcements').doc(id).delete();
+  }catch(e){
+    alert("Couldn't delete this announcement — check your connection and try again.");
+  }
 }
 async function deleteQuiz(id){
   if(!confirm('Delete this quiz? Student responses to it will no longer be visible.')) return;
-  await db.collection('classes').doc(classId).collection('quizzes').doc(id).delete();
+  try{
+    await db.collection('classes').doc(classId).collection('quizzes').doc(id).delete();
+  }catch(e){
+    alert("Couldn't delete this quiz — check your connection and try again.");
+  }
 }
 
 /* --------------------------- 5. MODALS --------------------------- */
@@ -341,18 +375,30 @@ function openAssignmentModal(){
     <div class="field"><label>Instructions</label><textarea id="f-instr" rows="3" placeholder="What should students do?"></textarea></div>
     <div class="field"><label>Due date</label><input id="f-due" type="date" value="${addDays(3)}"></div>
     <div class="form-actions"><button class="btn" id="f-cancel">Cancel</button><button class="btn primary" id="f-save">Post assignment</button></div>
+    <div class="gate-error" id="f-error"></div>
   `);
   modal.querySelector('#f-cancel').onclick = ()=> modal.remove();
   modal.querySelector('#f-save').onclick = async ()=>{
     const title = modal.querySelector('#f-title').value.trim();
     if(!title) return;
-    await db.collection('classes').doc(classId).collection('assignments').add({
-      title,
-      instructions: modal.querySelector('#f-instr').value.trim(),
-      dueDate: modal.querySelector('#f-due').value || addDays(3),
-      createdAt: firebase.firestore.FieldValue.serverTimestamp()
-    });
-    modal.remove();
+    const saveBtn = modal.querySelector('#f-save');
+    const err = modal.querySelector('#f-error');
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Posting…';
+    err.textContent = '';
+    try{
+      await db.collection('classes').doc(classId).collection('assignments').add({
+        title,
+        instructions: modal.querySelector('#f-instr').value.trim(),
+        dueDate: modal.querySelector('#f-due').value || addDays(3),
+        createdAt: firebase.firestore.FieldValue.serverTimestamp()
+      });
+      modal.remove();
+    }catch(e){
+      saveBtn.disabled = false;
+      saveBtn.textContent = 'Post assignment';
+      err.textContent = "Couldn't save — check your connection and try again.";
+    }
   };
 }
 
@@ -362,16 +408,28 @@ function openAnnouncementModal(){
     <div class="field"><label>Title</label><input id="f-title" placeholder="Quiz moved to Friday"></div>
     <div class="field"><label>Message</label><textarea id="f-body" rows="3" placeholder="What do you want the class to know?"></textarea></div>
     <div class="form-actions"><button class="btn" id="f-cancel">Cancel</button><button class="btn primary" id="f-save">Post</button></div>
+    <div class="gate-error" id="f-error"></div>
   `);
   modal.querySelector('#f-cancel').onclick = ()=> modal.remove();
   modal.querySelector('#f-save').onclick = async ()=>{
     const title = modal.querySelector('#f-title').value.trim();
     if(!title) return;
-    await db.collection('classes').doc(classId).collection('announcements').add({
-      title, body: modal.querySelector('#f-body').value.trim(),
-      postedAt: firebase.firestore.FieldValue.serverTimestamp()
-    });
-    modal.remove();
+    const saveBtn = modal.querySelector('#f-save');
+    const err = modal.querySelector('#f-error');
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Posting…';
+    err.textContent = '';
+    try{
+      await db.collection('classes').doc(classId).collection('announcements').add({
+        title, body: modal.querySelector('#f-body').value.trim(),
+        postedAt: firebase.firestore.FieldValue.serverTimestamp()
+      });
+      modal.remove();
+    }catch(e){
+      saveBtn.disabled = false;
+      saveBtn.textContent = 'Post';
+      err.textContent = "Couldn't save — check your connection and try again.";
+    }
   };
 }
 
@@ -612,12 +670,21 @@ function openQuizModal(){
       alert('This quiz is too large to save (likely from full-size images). Remove an image or two, or use smaller photos, and try again.');
       return;
     }
-    await db.collection('classes').doc(classId).collection('quizzes').add({
-      title,
-      questions: builderQuestions,
-      createdAt: firebase.firestore.FieldValue.serverTimestamp()
-    });
-    modal.remove();
+    const saveBtn = modal.querySelector('#f-save');
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Saving…';
+    try{
+      await db.collection('classes').doc(classId).collection('quizzes').add({
+        title,
+        questions: builderQuestions,
+        createdAt: firebase.firestore.FieldValue.serverTimestamp()
+      });
+      modal.remove();
+    }catch(e){
+      saveBtn.disabled = false;
+      saveBtn.textContent = 'Create quiz';
+      alert("Couldn't save this quiz — check your connection and try again.");
+    }
   };
 }
 
