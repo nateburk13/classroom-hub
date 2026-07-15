@@ -61,6 +61,7 @@ let quizzes = [];
 let mySubmissions = {}; // assignmentId -> { text, submittedAt }
 let myQuizResponses = {}; // quizId -> { studentName, answers: { questionId: { attempts:[], solved } } }
 let selectedMcAnswer = {}; // "quizId-questionId" -> chosen option text (before submit)
+let loaded = { assignments: false, announcements: false, quizzes: false };
 
 function studentDocId(){
   // stable, readable doc id derived from the student's name
@@ -83,6 +84,7 @@ function startApp(id, info, name){
           .collection('submissions').doc(studentDocId()).get();
         mySubmissions[a.id] = subDoc.exists ? subDoc.data() : null;
       }
+      loaded.assignments = true;
       render();
       markSynced(true);
     }, ()=> markSynced(false));
@@ -90,6 +92,7 @@ function startApp(id, info, name){
   db.collection('classes').doc(classId).collection('announcements')
     .onSnapshot((snap)=>{
       announcements = snap.docs.map(d=>({ id:d.id, ...d.data() }));
+      loaded.announcements = true;
       render();
       markSynced(true);
     }, ()=> markSynced(false));
@@ -102,6 +105,7 @@ function startApp(id, info, name){
           .collection('responses').doc(studentDocId()).get();
         myQuizResponses[q.id] = respDoc.exists ? respDoc.data() : { studentName, answers: {} };
       }
+      loaded.quizzes = true;
       render();
       markSynced(true);
     }, ()=> markSynced(false));
@@ -135,7 +139,8 @@ function renderDashboard(){
 
   let html = `<div class="grid-2">`;
   html += `<div class="card"><h3>Upcoming assignments</h3>`;
-  if(upcoming.length === 0){ html += `<p class="meta">Nothing assigned yet.</p>`; }
+  if(!loaded.assignments){ html += `<p class="meta">Loading…</p>`; }
+  else if(upcoming.length === 0){ html += `<p class="meta">Nothing assigned yet.</p>`; }
   else{
     upcoming.forEach(a=>{
       const status = statusFor(a);
@@ -148,7 +153,8 @@ function renderDashboard(){
   html += `</div>`;
 
   html += `<div class="card"><h3>Latest announcement</h3>`;
-  if(!recentAnnouncement){ html += `<p class="meta">No announcements yet.</p>`; }
+  if(!loaded.announcements){ html += `<p class="meta">Loading…</p>`; }
+  else if(!recentAnnouncement){ html += `<p class="meta">No announcements yet.</p>`; }
   else{
     html += `<div style="font-weight:600;font-size:13px;">${escapeHtml(recentAnnouncement.title)}</div>
       <p class="body-text">${escapeHtml(recentAnnouncement.body)}</p>
@@ -160,6 +166,10 @@ function renderDashboard(){
 
 function renderAssignments(){
   setHeader('Assignments', 'View instructions and submit your work.');
+  if(!loaded.assignments){
+    viewRoot.innerHTML = `<div class="empty"><h3>Loading assignments…</h3><p>Connecting to your class.</p></div>`;
+    return;
+  }
   if(assignments.length === 0){
     viewRoot.innerHTML = `<div class="empty"><h3>No assignments yet</h3><p>Check back once your teacher posts an assignment.</p></div>`;
     return;
@@ -191,6 +201,10 @@ function renderAssignments(){
 
 function renderAnnouncements(){
   setHeader('Announcements', 'Updates from your teacher.');
+  if(!loaded.announcements){
+    viewRoot.innerHTML = `<div class="empty"><h3>Loading announcements…</h3><p>Connecting to your class.</p></div>`;
+    return;
+  }
   if(announcements.length === 0){
     viewRoot.innerHTML = `<div class="empty"><h3>No announcements yet</h3><p>Nothing posted yet — check back soon.</p></div>`;
     return;
@@ -208,6 +222,10 @@ function renderAnnouncements(){
 
 function renderQuizzes(){
   setHeader('Quizzes', "Answer each question — you'll know right away if you got it right.");
+  if(!loaded.quizzes){
+    viewRoot.innerHTML = `<div class="empty"><h3>Loading quizzes…</h3><p>Connecting to your class.</p></div>`;
+    return;
+  }
   if(quizzes.length === 0){
     viewRoot.innerHTML = `<div class="empty"><h3>No quizzes yet</h3><p>Check back once your teacher posts one.</p></div>`;
     return;
@@ -298,14 +316,30 @@ async function submitQuizAnswer(quizId, questionId, value){
     ? value === question.correctAnswer
     : value.trim().toLowerCase() === (question.correctAnswer || '').trim().toLowerCase();
 
+  // snapshot for rollback in case the write fails
+  const prevAttempts = [...ans.attempts];
+  const prevSolved = ans.solved;
+
   ans.attempts.push({ value, correct: isCorrect, at: Date.now() });
   if(isCorrect) ans.solved = true;
   resp.answers[questionId] = ans;
   resp.studentName = studentName;
   myQuizResponses[quizId] = resp;
+  render();
 
-  await db.collection('classes').doc(classId).collection('quizzes').doc(quizId)
-    .collection('responses').doc(studentDocId()).set(resp, { merge: true });
+  try{
+    await db.collection('classes').doc(classId).collection('quizzes').doc(quizId)
+      .collection('responses').doc(studentDocId()).set(resp, { merge: true });
+  }catch(e){
+    // roll back the optimistic update so the UI matches what's actually saved
+    ans.attempts = prevAttempts;
+    ans.solved = prevSolved;
+    resp.answers[questionId] = ans;
+    myQuizResponses[quizId] = resp;
+    render();
+    alert("Couldn't save your answer — check your connection and try again.");
+    return;
+  }
 
   render();
 }
@@ -336,15 +370,27 @@ function openSubmitModal(assignmentId){
     <h3>Submit: ${escapeHtml(a.title)}</h3>
     <div class="field"><label>Your response</label><textarea id="f-text" rows="4" placeholder="Paste your work or notes here">${existing ? escapeHtml(existing.text) : ''}</textarea></div>
     <div class="form-actions"><button class="btn" id="f-cancel">Cancel</button><button class="btn primary" id="f-save">${existing ? 'Update' : 'Submit'}</button></div>
+    <div class="gate-error" id="f-error"></div>
   `);
   modal.querySelector('#f-cancel').onclick = ()=> modal.remove();
   modal.querySelector('#f-save').onclick = async ()=>{
     const text = modal.querySelector('#f-text').value.trim();
-    await db.collection('classes').doc(classId).collection('assignments').doc(assignmentId)
-      .collection('submissions').doc(studentDocId()).set({
-        studentName, text, submittedAt: firebase.firestore.FieldValue.serverTimestamp()
-      });
-    modal.remove();
+    const saveBtn = modal.querySelector('#f-save');
+    const err = modal.querySelector('#f-error');
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Saving…';
+    err.textContent = '';
+    try{
+      await db.collection('classes').doc(classId).collection('assignments').doc(assignmentId)
+        .collection('submissions').doc(studentDocId()).set({
+          studentName, text, submittedAt: firebase.firestore.FieldValue.serverTimestamp()
+        });
+      modal.remove();
+    }catch(e){
+      saveBtn.disabled = false;
+      saveBtn.textContent = existing ? 'Update' : 'Submit';
+      err.textContent = "Couldn't save — check your connection and try again.";
+    }
   };
 }
 

@@ -379,11 +379,15 @@ async function openReviewModal(assignmentId){
   const subsSnap = await db.collection('classes').doc(classId).collection('assignments').doc(assignmentId).collection('submissions').get();
   const rows = subsSnap.docs.map(d=>{
     const s = d.data();
-    return `<tr><td style="font-weight:600;">${escapeHtml(s.studentName)}</td><td class="meta">${escapeHtml(s.text || '(no text)')}</td><td class="meta">${timeAgo(tsVal(s.submittedAt))}</td></tr>`;
+    return `<tr>
+      <td data-label="Student" style="font-weight:600;">${escapeHtml(s.studentName)}</td>
+      <td data-label="Response" class="meta">${escapeHtml(s.text || '(no text)')}</td>
+      <td data-label="When" class="meta">${timeAgo(tsVal(s.submittedAt))}</td>
+    </tr>`;
   }).join('');
   const modal = openModal(`
     <h3>Submissions</h3>
-    ${subsSnap.empty ? '<p class="meta">No submissions yet.</p>' : `<div style="max-height:320px;overflow:auto;"><table style="width:100%;font-size:13px;border-collapse:collapse;"><thead><tr><th style="text-align:left;padding:6px;">Student</th><th style="text-align:left;padding:6px;">Response</th><th style="text-align:left;padding:6px;">When</th></tr></thead><tbody>${rows}</tbody></table></div>`}
+    ${subsSnap.empty ? '<p class="meta">No submissions yet.</p>' : `<div style="max-height:320px;overflow:auto;"><table class="sub-table" style="width:100%;font-size:13px;border-collapse:collapse;"><thead><tr><th style="text-align:left;padding:6px;">Student</th><th style="text-align:left;padding:6px;">Response</th><th style="text-align:left;padding:6px;">When</th></tr></thead><tbody>${rows}</tbody></table></div>`}
     <div class="form-actions"><button class="btn" id="f-close">Close</button></div>
   `);
   modal.querySelector('#f-close').onclick = ()=> modal.remove();
@@ -644,7 +648,7 @@ async function openQuizResultsModal(quizId){
       });
       rows += `</tr>`;
     });
-    body = `<div style="max-height:360px;overflow:auto;"><table style="width:100%;font-size:12px;border-collapse:collapse;">
+    body = `<div class="table-scroll" style="max-height:360px;overflow:auto;"><table class="scroll-table" style="width:100%;font-size:12px;border-collapse:collapse;">
       <thead><tr><th style="text-align:left;padding:6px;">Student</th>${quiz.questions.map((q, i)=> `<th style="text-align:left;padding:6px;">Q${i + 1}</th>`).join('')}</tr></thead>
       <tbody>${rows}</tbody></table></div>`;
   }
