@@ -325,10 +325,10 @@ async function deleteQuiz(id){
 }
 
 /* --------------------------- 5. MODALS --------------------------- */
-function openModal(html){
+function openModal(html, extraClass){
   const bg = document.createElement('div');
   bg.className = 'modal-bg';
-  bg.innerHTML = `<div class="modal">${html}</div>`;
+  bg.innerHTML = `<div class="modal${extraClass ? ' ' + extraClass : ''}">${html}</div>`;
   bg.addEventListener('click', (e)=>{ if(e.target === bg) bg.remove(); });
   document.body.appendChild(bg);
   return bg;
@@ -395,13 +395,62 @@ function blankQuestion(){
   return { id: newQuestionId(), type: 'mc', questionText: '', imageUrl: '', options: ['', '', ''], correctAnswer: '', maxAttempts: 3 };
 }
 
+// Reads an image file, shrinks it, and returns a compressed data-URL so quiz
+// documents stay well under Firestore's 1MB-per-document limit.
+function resizeImageToDataUrl(file, maxWidth, quality){
+  return new Promise((resolve, reject)=>{
+    const reader = new FileReader();
+    reader.onerror = ()=> reject(new Error('Could not read file'));
+    reader.onload = ()=>{
+      const img = new Image();
+      img.onerror = ()=> reject(new Error('Could not decode image'));
+      img.onload = ()=>{
+        let { width, height } = img;
+        if(width > maxWidth){ height = Math.round(height * (maxWidth / width)); width = maxWidth; }
+        const canvas = document.createElement('canvas');
+        canvas.width = width; canvas.height = height;
+        canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL('image/jpeg', quality));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+// Turns rows from the spreadsheet template into question objects.
+function questionsFromSheetRows(rows){
+  return rows.map(r=>{
+    const rawType = String(r['Type'] || 'mc').trim().toLowerCase();
+    const type = rawType === 'text' ? 'text' : 'mc';
+    const options = ['Option 1', 'Option 2', 'Option 3', 'Option 4']
+      .map(k=> (r[k] === undefined || r[k] === null) ? '' : String(r[k]).trim())
+      .filter(o=> o !== '');
+    const maxAttempts = parseInt(r['Max Attempts'], 10);
+    return {
+      id: newQuestionId(),
+      type,
+      questionText: String(r['Question'] || '').trim(),
+      imageUrl: '',
+      options: type === 'mc' ? (options.length ? options : ['', '', '']) : [],
+      correctAnswer: String(r['Correct Answer'] || '').trim(),
+      maxAttempts: (Number.isFinite(maxAttempts) && maxAttempts > 0) ? maxAttempts : 3
+    };
+  }).filter(q=> q.questionText !== '');
+}
+
 function questionRowHtml(q, index){
   const isMc = q.type === 'mc';
   return `<div class="qbuilder-row" data-qrow="${q.id}">
     <button type="button" class="btn small danger remove-q" data-remove-q="${q.id}">Remove</button>
     <div class="meta" style="margin-bottom:8px;font-weight:700;">Question ${index + 1}</div>
     <div class="field"><label>Question text</label><textarea rows="2" data-q-text="${q.id}" placeholder="What is the powerhouse of the cell?">${escapeHtml(q.questionText)}</textarea></div>
-    <div class="field"><label>Image URL (optional)</label><input data-q-image="${q.id}" placeholder="https://example.com/diagram.png" value="${escapeHtml(q.imageUrl)}"></div>
+    <div class="field"><label>Image (optional)</label>
+      ${q.imageUrl ? `<img src="${q.imageUrl}" style="max-width:220px;max-height:140px;border-radius:8px;display:block;margin-bottom:8px;object-fit:contain;">` : ''}
+      <input type="file" accept="image/*" data-q-imagefile="${q.id}">
+      ${q.imageUrl ? `<button type="button" class="btn small" data-remove-image="${q.id}" style="margin-top:6px;">Remove image</button>` : ''}
+      <div class="meta" data-q-imagestatus="${q.id}" style="margin-top:4px;"></div>
+    </div>
     <div class="field"><label>Answer type</label>
       <select data-q-type="${q.id}">
         <option value="mc" ${isMc ? 'selected' : ''}>Multiple choice</option>
@@ -428,17 +477,20 @@ function openQuizModal(){
   const modal = openModal(`
     <h3>New quiz</h3>
     <div class="field"><label>Quiz title</label><input id="qz-title" placeholder="Chapter 4 review"></div>
+    <div class="form-actions" style="justify-content:flex-start;margin-bottom:14px;">
+      <button type="button" class="btn small" id="qz-import-btn">Import from spreadsheet</button>
+      <input type="file" id="qz-import-file" accept=".xlsx,.xls,.csv" style="display:none;">
+    </div>
     <div id="qz-questions"></div>
     <button type="button" class="btn small" id="qz-add-question">Add question</button>
     <div class="form-actions"><button class="btn" id="f-cancel">Cancel</button><button class="btn primary" id="f-save">Create quiz</button></div>
-  `);
+  `, 'wide');
 
   function syncFromDom(){
     builderQuestions.forEach(q=>{
       const row = modal.querySelector(`[data-qrow="${q.id}"]`);
       if(!row) return;
       q.questionText = row.querySelector(`[data-q-text="${q.id}"]`).value;
-      q.imageUrl = row.querySelector(`[data-q-image="${q.id}"]`).value.trim();
       q.type = row.querySelector(`[data-q-type="${q.id}"]`).value;
       q.correctAnswer = row.querySelector(`[data-q-correct="${q.id}"]`).value.trim();
       q.maxAttempts = parseInt(row.querySelector(`[data-q-attempts="${q.id}"]`).value, 10) || 3;
@@ -478,6 +530,30 @@ function openQuizModal(){
         renderBuilder();
       };
     });
+    wrap.querySelectorAll('[data-q-imagefile]').forEach(input=>{
+      input.onchange = async ()=>{
+        const file = input.files[0];
+        if(!file) return;
+        const q = builderQuestions.find(x=> x.id === input.dataset.qImagefile);
+        const statusEl = wrap.querySelector(`[data-q-imagestatus="${q.id}"]`);
+        syncFromDom();
+        statusEl.textContent = 'Processing image…';
+        try{
+          q.imageUrl = await resizeImageToDataUrl(file, 700, 0.72);
+        }catch(e){
+          alert('Could not read that image. Try a different file.');
+        }
+        renderBuilder();
+      };
+    });
+    wrap.querySelectorAll('[data-remove-image]').forEach(btn=>{
+      btn.onclick = ()=>{
+        syncFromDom();
+        const q = builderQuestions.find(x=> x.id === btn.dataset.removeImage);
+        q.imageUrl = '';
+        renderBuilder();
+      };
+    });
   }
 
   renderBuilder();
@@ -486,6 +562,29 @@ function openQuizModal(){
     syncFromDom();
     builderQuestions.push(blankQuestion());
     renderBuilder();
+  };
+  modal.querySelector('#qz-import-btn').onclick = ()=> modal.querySelector('#qz-import-file').click();
+  modal.querySelector('#qz-import-file').onchange = ()=>{
+    const file = modal.querySelector('#qz-import-file').files[0];
+    if(!file) return;
+    const reader = new FileReader();
+    reader.onload = (evt)=>{
+      try{
+        const wb = XLSX.read(evt.target.result, { type: 'array' });
+        const sheet = wb.Sheets[wb.SheetNames[0]];
+        const rows = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+        const imported = questionsFromSheetRows(rows);
+        if(imported.length === 0){ alert("No valid questions found. Make sure the file matches the template (a 'Question' column with text in it)."); return; }
+        syncFromDom();
+        const isBlankStart = builderQuestions.length === 1 && !builderQuestions[0].questionText.trim();
+        builderQuestions = isBlankStart ? imported : builderQuestions.concat(imported);
+        renderBuilder();
+        alert(`Imported ${imported.length} question${imported.length === 1 ? '' : 's'}. Add images individually if needed, then create the quiz.`);
+      }catch(e){
+        alert("Could not read that file. Make sure it's a .xlsx, .xls, or .csv file matching the template.");
+      }
+    };
+    reader.readAsArrayBuffer(file);
   };
   modal.querySelector('#f-cancel').onclick = ()=> modal.remove();
   modal.querySelector('#f-save').onclick = async ()=>{
@@ -503,6 +602,11 @@ function openQuizModal(){
         return;
       }
       if(!q.maxAttempts || q.maxAttempts < 1) q.maxAttempts = 1;
+    }
+    const estimatedBytes = new Blob([JSON.stringify(builderQuestions)]).size;
+    if(estimatedBytes > 900000){
+      alert('This quiz is too large to save (likely from full-size images). Remove an image or two, or use smaller photos, and try again.');
+      return;
     }
     await db.collection('classes').doc(classId).collection('quizzes').add({
       title,
