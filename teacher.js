@@ -14,6 +14,12 @@ function makeClassCode(){
   return code;
 }
 
+async function hashPasscode(str){
+  const enc = new TextEncoder().encode(str);
+  const digest = await crypto.subtle.digest('SHA-256', enc);
+  return Array.from(new Uint8Array(digest)).map(b=> b.toString(16).padStart(2,'0')).join('');
+}
+
 async function initGate(){
   const savedId = localStorage.getItem(LS_CLASS_ID);
   if(savedId){
@@ -29,22 +35,27 @@ function showCreateGate(){
     <div class="gate-card">
       <div class="mark">CH</div>
       <h2>Set up your class</h2>
-      <p>This creates a join code your students will use to see assignments and announcements in real time.</p>
+      <p>This creates a join code your students will use to see assignments and announcements in real time. The password lets you manage this class from other devices later.</p>
       <div class="field"><label>Class name</label><input id="g-class" placeholder="Period 3 — Biology"></div>
       <div class="field"><label>Your name</label><input id="g-teacher" placeholder="Ms. Alvarez"></div>
+      <div class="field"><label>Set a teacher password</label><input id="g-password" type="password" placeholder="Something only you know"></div>
       <button class="btn primary" id="g-submit" style="width:100%;">Create class</button>
       <div class="gate-error" id="g-error"></div>
+      <p class="meta" style="text-align:center;margin-top:16px;">Already have a class? <a href="#" id="g-switch-resume">Log in on this device</a></p>
     </div>`;
   document.getElementById('g-submit').onclick = async ()=>{
     const className = document.getElementById('g-class').value.trim();
     const teacherName = document.getElementById('g-teacher').value.trim();
+    const password = document.getElementById('g-password').value;
     const err = document.getElementById('g-error');
-    if(!className || !teacherName){ err.textContent = 'Fill in both fields to continue.'; return; }
+    if(!className || !teacherName || !password){ err.textContent = 'Fill in all fields to continue.'; return; }
+    if(password.length < 4){ err.textContent = 'Password should be at least 4 characters.'; return; }
     err.textContent = 'Creating class…';
     try{
       const code = makeClassCode();
+      const passcodeHash = await hashPasscode(password);
       const ref = await db.collection('classes').add({
-        className, teacherName, code, createdAt: firebase.firestore.FieldValue.serverTimestamp()
+        className, teacherName, code, passcodeHash, createdAt: firebase.firestore.FieldValue.serverTimestamp()
       });
       localStorage.setItem(LS_CLASS_ID, ref.id);
       const doc = await ref.get();
@@ -53,6 +64,42 @@ function showCreateGate(){
       err.textContent = 'Could not reach the database. Check firebase-config.js is filled in correctly.';
     }
   };
+  document.getElementById('g-switch-resume').onclick = (e)=>{ e.preventDefault(); showResumeGate(); };
+}
+
+function showResumeGate(){
+  document.getElementById('gate').innerHTML = `
+    <div class="gate-card">
+      <div class="mark">CH</div>
+      <h2>Log in to your class</h2>
+      <p>Enter your class join code and the teacher password you set when you created it.</p>
+      <div class="field"><label>Class code</label><input id="r-code" class="mono" placeholder="e.g. K7P2QX" style="text-transform:uppercase;letter-spacing:.08em;"></div>
+      <div class="field"><label>Teacher password</label><input id="r-password" type="password" placeholder="Your password"></div>
+      <button class="btn primary" id="r-submit" style="width:100%;">Log in</button>
+      <div class="gate-error" id="r-error"></div>
+      <p class="meta" style="text-align:center;margin-top:16px;">New here? <a href="#" id="r-switch-create">Create a class instead</a></p>
+    </div>`;
+  document.getElementById('r-submit').onclick = async ()=>{
+    const code = document.getElementById('r-code').value.trim().toUpperCase();
+    const password = document.getElementById('r-password').value;
+    const err = document.getElementById('r-error');
+    if(!code || !password){ err.textContent = 'Fill in both fields to continue.'; return; }
+    err.textContent = 'Checking…';
+    try{
+      const snap = await db.collection('classes').where('code','==',code).limit(1).get();
+      if(snap.empty){ err.textContent = 'No class found with that code.'; return; }
+      const doc = snap.docs[0];
+      const info = doc.data();
+      if(!info.passcodeHash){ err.textContent = 'This class has no password set — it was created before this feature existed.'; return; }
+      const hash = await hashPasscode(password);
+      if(hash !== info.passcodeHash){ err.textContent = 'Incorrect password.'; return; }
+      localStorage.setItem(LS_CLASS_ID, doc.id);
+      startApp(doc.id, info);
+    }catch(e){
+      err.textContent = 'Could not reach the database. Check firebase-config.js is filled in correctly.';
+    }
+  };
+  document.getElementById('r-switch-create').onclick = (e)=>{ e.preventDefault(); showCreateGate(); };
 }
 
 /* --------------------------- 2. STATE --------------------------- */
