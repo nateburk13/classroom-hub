@@ -57,7 +57,10 @@ let studentName = null;
 let currentView = 'dashboard';
 let assignments = [];
 let announcements = [];
+let quizzes = [];
 let mySubmissions = {}; // assignmentId -> { text, submittedAt }
+let myQuizResponses = {}; // quizId -> { studentName, answers: { questionId: { attempts:[], solved } } }
+let selectedMcAnswer = {}; // "quizId-questionId" -> chosen option text (before submit)
 
 function studentDocId(){
   // stable, readable doc id derived from the student's name
@@ -90,6 +93,18 @@ function startApp(id, info, name){
       render();
       markSynced(true);
     }, ()=> markSynced(false));
+
+  db.collection('classes').doc(classId).collection('quizzes')
+    .onSnapshot(async (snap)=>{
+      quizzes = snap.docs.map(d=>({ id:d.id, ...d.data() }));
+      for(const q of quizzes){
+        const respDoc = await db.collection('classes').doc(classId).collection('quizzes').doc(q.id)
+          .collection('responses').doc(studentDocId()).get();
+        myQuizResponses[q.id] = respDoc.exists ? respDoc.data() : { studentName, answers: {} };
+      }
+      render();
+      markSynced(true);
+    }, ()=> markSynced(false));
 }
 
 function markSynced(ok){
@@ -104,7 +119,7 @@ const viewRoot = document.getElementById('view-root');
 
 function render(){
   document.querySelectorAll('.nav-btn').forEach(b=> b.classList.toggle('active', b.dataset.view === currentView));
-  const renderers = { dashboard: renderDashboard, assignments: renderAssignments, announcements: renderAnnouncements };
+  const renderers = { dashboard: renderDashboard, assignments: renderAssignments, announcements: renderAnnouncements, quizzes: renderQuizzes };
   (renderers[currentView] || renderDashboard)();
 }
 
@@ -189,6 +204,110 @@ function renderAnnouncements(){
     </div>`;
   });
   viewRoot.innerHTML = html;
+}
+
+function renderQuizzes(){
+  setHeader('Quizzes', "Answer each question — you'll know right away if you got it right.");
+  if(quizzes.length === 0){
+    viewRoot.innerHTML = `<div class="empty"><h3>No quizzes yet</h3><p>Check back once your teacher posts one.</p></div>`;
+    return;
+  }
+  let html = '';
+  quizzes.forEach(quiz=>{
+    html += `<div class="card"><h3>${escapeHtml(quiz.title)}</h3>`;
+    quiz.questions.forEach((q, i)=>{ html += renderQuizQuestion(quiz.id, q, i); });
+    html += `</div>`;
+  });
+  viewRoot.innerHTML = html;
+  wireQuizHandlers();
+}
+
+function renderQuizQuestion(quizId, q, index){
+  const resp = myQuizResponses[quizId] || { answers: {} };
+  const ans = (resp.answers && resp.answers[q.id]) || { attempts: [], solved: false };
+  const attemptsUsed = ans.attempts.length;
+  const remaining = q.maxAttempts - attemptsUsed;
+  const solved = !!ans.solved;
+  const revealed = solved || remaining <= 0;
+
+  let feedback = '';
+  if(solved){
+    feedback = `<div class="feedback correct">Correct! ✓</div>`;
+  }else if(revealed){
+    feedback = `<div class="feedback revealed">Out of attempts. Correct answer: ${escapeHtml(q.correctAnswer)}</div>`;
+  }else if(attemptsUsed > 0){
+    feedback = `<div class="feedback incorrect">Not quite — ${remaining} attempt${remaining === 1 ? '' : 's'} left</div>`;
+  }
+
+  let inputHtml = '';
+  if(!revealed){
+    if(q.type === 'mc'){
+      inputHtml = q.options.map(o=> `<div class="quiz-opt" data-mc-opt data-quiz="${quizId}" data-question="${q.id}" data-value="${escapeHtml(o)}">${escapeHtml(o)}</div>`).join('');
+      inputHtml += `<div class="form-actions"><button class="btn primary small" data-mc-submit data-quiz="${quizId}" data-question="${q.id}">Submit answer</button></div>`;
+    }else{
+      inputHtml = `<input data-text-answer data-quiz="${quizId}" data-question="${q.id}" placeholder="Your answer">
+        <div class="form-actions"><button class="btn primary small" data-text-submit data-quiz="${quizId}" data-question="${q.id}">Submit answer</button></div>`;
+    }
+  }
+
+  return `<div class="quiz-q">
+    <div style="font-weight:600;font-size:13px;">${index + 1}. ${escapeHtml(q.questionText)}</div>
+    ${q.imageUrl ? `<img src="${escapeHtml(q.imageUrl)}" alt="">` : ''}
+    ${inputHtml}
+    ${feedback}
+  </div>`;
+}
+
+function wireQuizHandlers(){
+  viewRoot.querySelectorAll('[data-mc-opt]').forEach(el=>{
+    el.onclick = ()=>{
+      const key = el.dataset.quiz + '-' + el.dataset.question;
+      viewRoot.querySelectorAll(`[data-mc-opt][data-quiz="${el.dataset.quiz}"][data-question="${el.dataset.question}"]`)
+        .forEach(o=> o.classList.remove('selected'));
+      el.classList.add('selected');
+      selectedMcAnswer[key] = el.dataset.value;
+    };
+  });
+  viewRoot.querySelectorAll('[data-mc-submit]').forEach(btn=>{
+    btn.onclick = ()=>{
+      const key = btn.dataset.quiz + '-' + btn.dataset.question;
+      const value = selectedMcAnswer[key];
+      if(!value){ alert('Choose an option first.'); return; }
+      submitQuizAnswer(btn.dataset.quiz, btn.dataset.question, value);
+    };
+  });
+  viewRoot.querySelectorAll('[data-text-submit]').forEach(btn=>{
+    btn.onclick = ()=>{
+      const input = viewRoot.querySelector(`[data-text-answer][data-quiz="${btn.dataset.quiz}"][data-question="${btn.dataset.question}"]`);
+      const value = input.value.trim();
+      if(!value){ alert('Type an answer first.'); return; }
+      submitQuizAnswer(btn.dataset.quiz, btn.dataset.question, value);
+    };
+  });
+}
+
+async function submitQuizAnswer(quizId, questionId, value){
+  const quiz = quizzes.find(q=> q.id === quizId);
+  const question = quiz.questions.find(q=> q.id === questionId);
+  const resp = myQuizResponses[quizId] || { studentName, answers: {} };
+  const ans = resp.answers[questionId] || { attempts: [], solved: false };
+
+  if(ans.solved || ans.attempts.length >= question.maxAttempts) return;
+
+  const isCorrect = question.type === 'mc'
+    ? value === question.correctAnswer
+    : value.trim().toLowerCase() === (question.correctAnswer || '').trim().toLowerCase();
+
+  ans.attempts.push({ value, correct: isCorrect, at: Date.now() });
+  if(isCorrect) ans.solved = true;
+  resp.answers[questionId] = ans;
+  resp.studentName = studentName;
+  myQuizResponses[quizId] = resp;
+
+  await db.collection('classes').doc(classId).collection('quizzes').doc(quizId)
+    .collection('responses').doc(studentDocId()).set(resp, { merge: true });
+
+  render();
 }
 
 /* --------------------------- 4. ACTIONS --------------------------- */

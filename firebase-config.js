@@ -1,10 +1,15 @@
+/* =========================================================================
+   FIREBASE CONFIG — fill this in with your own project's values.
+   See README.md for step-by-step setup instructions (takes about 5 minutes,
+   free tier is plenty for a classroom).
+   ========================================================================= */
 const firebaseConfig = {
-  apiKey: "AIzaSyDduotFV1ZIrBkNtwdPgQIfFourHQgEmmg",
-  authDomain: "classroom-hub-21f79.firebaseapp.com",
-  projectId: "classroom-hub-21f79",
-  storageBucket: "classroom-hub-21f79.firebasestorage.app",
-  messagingSenderId: "1024585802487",
-  appId: "1:1024585802487:web:a0f103fd1a56d740ada9f2"
+  apiKey: "YOUR_API_KEY",
+  authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
+  projectId: "YOUR_PROJECT_ID",
+  storageBucket: "YOUR_PROJECT_ID.appspot.com",
+  messagingSenderId: "YOUR_SENDER_ID",
+  appId: "YOUR_APP_ID"
 };
 
 firebase.initializeApp(firebaseConfig);

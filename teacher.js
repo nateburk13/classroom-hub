@@ -61,8 +61,10 @@ let classInfo = null;
 let currentView = 'dashboard';
 let unsubAssignments = null;
 let unsubAnnouncements = null;
+let unsubQuizzes = null;
 let assignments = [];
 let announcements = [];
+let quizzes = [];
 
 function startApp(id, info){
   classId = id;
@@ -92,6 +94,19 @@ function startApp(id, info){
       render();
       markSynced(true);
     }, ()=> markSynced(false));
+
+  unsubQuizzes = db.collection('classes').doc(classId).collection('quizzes')
+    .onSnapshot(async (snap)=>{
+      quizzes = [];
+      for(const d of snap.docs){
+        const q = { id: d.id, ...d.data() };
+        const respSnap = await db.collection('classes').doc(classId).collection('quizzes').doc(d.id).collection('responses').get();
+        q.responseCount = respSnap.size;
+        quizzes.push(q);
+      }
+      render();
+      markSynced(true);
+    }, ()=> markSynced(false));
 }
 
 function markSynced(ok){
@@ -106,7 +121,7 @@ const viewRoot = document.getElementById('view-root');
 
 function render(){
   document.querySelectorAll('.nav-btn').forEach(b=> b.classList.toggle('active', b.dataset.view === currentView));
-  const renderers = { dashboard: renderDashboard, assignments: renderAssignments, announcements: renderAnnouncements };
+  const renderers = { dashboard: renderDashboard, assignments: renderAssignments, announcements: renderAnnouncements, quizzes: renderQuizzes };
   (renderers[currentView] || renderDashboard)();
 }
 
@@ -211,6 +226,38 @@ function renderAnnouncements(){
   viewRoot.querySelectorAll('[data-delete-ann]').forEach(b=> b.onclick = ()=> deleteAnnouncement(b.dataset.deleteAnn));
 }
 
+function renderQuizzes(){
+  setHeader('Quizzes', 'Build quizzes and see how the class did.');
+  let html = `<div class="section-head"><div></div><button class="btn primary small" id="btn-new-quiz">New quiz</button></div>`;
+
+  if(quizzes.length === 0){
+    html += `<div class="empty"><h3>No quizzes yet</h3><p>Create a quiz with multiple choice or text questions.</p></div>`;
+    viewRoot.innerHTML = html;
+    document.getElementById('btn-new-quiz').onclick = openQuizModal;
+    return;
+  }
+
+  quizzes.forEach(q=>{
+    html += `<div class="card">
+      <div class="card-row">
+        <div>
+          <h3>${escapeHtml(q.title)}</h3>
+          <div class="meta">${q.questions.length} question${q.questions.length===1?'':'s'} · ${q.responseCount} student${q.responseCount===1?'':'s'} responded</div>
+        </div>
+      </div>
+      <div class="form-actions">
+        <button class="btn small" data-quiz-results="${q.id}">View results</button>
+        <button class="btn small danger" data-delete-quiz="${q.id}">Delete</button>
+      </div>
+    </div>`;
+  });
+
+  viewRoot.innerHTML = html;
+  document.getElementById('btn-new-quiz').onclick = openQuizModal;
+  viewRoot.querySelectorAll('[data-quiz-results]').forEach(b=> b.onclick = ()=> openQuizResultsModal(b.dataset.quizResults));
+  viewRoot.querySelectorAll('[data-delete-quiz]').forEach(b=> b.onclick = ()=> deleteQuiz(b.dataset.deleteQuiz));
+}
+
 /* --------------------------- 4. ACTIONS --------------------------- */
 function statusFor(assignment){
   const overdue = assignment.dueDate && new Date(assignment.dueDate) < new Date(new Date().toDateString());
@@ -224,6 +271,10 @@ async function deleteAssignment(id){
 }
 async function deleteAnnouncement(id){
   await db.collection('classes').doc(classId).collection('announcements').doc(id).delete();
+}
+async function deleteQuiz(id){
+  if(!confirm('Delete this quiz? Student responses to it will no longer be visible.')) return;
+  await db.collection('classes').doc(classId).collection('quizzes').doc(id).delete();
 }
 
 /* --------------------------- 5. MODALS --------------------------- */
@@ -288,6 +339,166 @@ async function openReviewModal(assignmentId){
     ${subsSnap.empty ? '<p class="meta">No submissions yet.</p>' : `<div style="max-height:320px;overflow:auto;"><table style="width:100%;font-size:13px;border-collapse:collapse;"><thead><tr><th style="text-align:left;padding:6px;">Student</th><th style="text-align:left;padding:6px;">Response</th><th style="text-align:left;padding:6px;">When</th></tr></thead><tbody>${rows}</tbody></table></div>`}
     <div class="form-actions"><button class="btn" id="f-close">Close</button></div>
   `);
+  modal.querySelector('#f-close').onclick = ()=> modal.remove();
+}
+
+function newQuestionId(){ return 'q' + Math.random().toString(36).slice(2, 10); }
+
+function blankQuestion(){
+  return { id: newQuestionId(), type: 'mc', questionText: '', imageUrl: '', options: ['', '', ''], correctAnswer: '', maxAttempts: 3 };
+}
+
+function questionRowHtml(q, index){
+  const isMc = q.type === 'mc';
+  return `<div class="qbuilder-row" data-qrow="${q.id}">
+    <button type="button" class="btn small danger remove-q" data-remove-q="${q.id}">Remove</button>
+    <div class="meta" style="margin-bottom:8px;font-weight:700;">Question ${index + 1}</div>
+    <div class="field"><label>Question text</label><textarea rows="2" data-q-text="${q.id}" placeholder="What is the powerhouse of the cell?">${escapeHtml(q.questionText)}</textarea></div>
+    <div class="field"><label>Image URL (optional)</label><input data-q-image="${q.id}" placeholder="https://example.com/diagram.png" value="${escapeHtml(q.imageUrl)}"></div>
+    <div class="field"><label>Answer type</label>
+      <select data-q-type="${q.id}">
+        <option value="mc" ${isMc ? 'selected' : ''}>Multiple choice</option>
+        <option value="text" ${!isMc ? 'selected' : ''}>Text answer</option>
+      </select>
+    </div>
+    <div data-q-options-wrap="${q.id}">${optionsHtml(q)}</div>
+    <div class="field"><label>Correct answer${isMc ? ' (must exactly match one option above)' : ' (not case sensitive)'}</label><input data-q-correct="${q.id}" placeholder="${isMc ? 'Copy the correct option exactly' : 'e.g. Mitochondria'}" value="${escapeHtml(q.correctAnswer)}"></div>
+    <div class="field"><label>Attempts allowed before the answer is revealed</label><input type="number" min="1" value="${q.maxAttempts || 3}" data-q-attempts="${q.id}" style="width:100px;"></div>
+  </div>`;
+}
+
+function optionsHtml(q){
+  if(q.type !== 'mc') return '';
+  const opts = (q.options && q.options.length) ? q.options : ['', '', ''];
+  return `<div class="field"><label>Options</label>
+    ${opts.map((o, i)=> `<input class="opt-input" data-q-opt="${q.id}" data-opt-index="${i}" value="${escapeHtml(o)}" placeholder="Option ${i + 1}">`).join('')}
+    <button type="button" class="btn small" data-add-opt="${q.id}">Add option</button></div>`;
+}
+
+function openQuizModal(){
+  let builderQuestions = [blankQuestion()];
+
+  const modal = openModal(`
+    <h3>New quiz</h3>
+    <div class="field"><label>Quiz title</label><input id="qz-title" placeholder="Chapter 4 review"></div>
+    <div id="qz-questions"></div>
+    <button type="button" class="btn small" id="qz-add-question">Add question</button>
+    <div class="form-actions"><button class="btn" id="f-cancel">Cancel</button><button class="btn primary" id="f-save">Create quiz</button></div>
+  `);
+
+  function syncFromDom(){
+    builderQuestions.forEach(q=>{
+      const row = modal.querySelector(`[data-qrow="${q.id}"]`);
+      if(!row) return;
+      q.questionText = row.querySelector(`[data-q-text="${q.id}"]`).value;
+      q.imageUrl = row.querySelector(`[data-q-image="${q.id}"]`).value.trim();
+      q.type = row.querySelector(`[data-q-type="${q.id}"]`).value;
+      q.correctAnswer = row.querySelector(`[data-q-correct="${q.id}"]`).value.trim();
+      q.maxAttempts = parseInt(row.querySelector(`[data-q-attempts="${q.id}"]`).value, 10) || 3;
+      if(q.type === 'mc'){
+        const optInputs = row.querySelectorAll(`[data-q-opt="${q.id}"]`);
+        q.options = Array.from(optInputs).map(i=> i.value.trim());
+      }
+    });
+  }
+
+  function renderBuilder(){
+    const wrap = modal.querySelector('#qz-questions');
+    wrap.innerHTML = builderQuestions.map((q, i)=> questionRowHtml(q, i)).join('');
+
+    wrap.querySelectorAll('[data-remove-q]').forEach(btn=>{
+      btn.onclick = ()=>{
+        syncFromDom();
+        builderQuestions = builderQuestions.filter(q=> q.id !== btn.dataset.removeQ);
+        if(builderQuestions.length === 0) builderQuestions = [blankQuestion()];
+        renderBuilder();
+      };
+    });
+    wrap.querySelectorAll('[data-q-type]').forEach(sel=>{
+      sel.onchange = ()=>{
+        syncFromDom();
+        const q = builderQuestions.find(x=> x.id === sel.dataset.qType);
+        q.type = sel.value;
+        if(q.type === 'mc' && (!q.options || q.options.length === 0)) q.options = ['', '', ''];
+        renderBuilder();
+      };
+    });
+    wrap.querySelectorAll('[data-add-opt]').forEach(btn=>{
+      btn.onclick = ()=>{
+        syncFromDom();
+        const q = builderQuestions.find(x=> x.id === btn.dataset.addOpt);
+        q.options.push('');
+        renderBuilder();
+      };
+    });
+  }
+
+  renderBuilder();
+
+  modal.querySelector('#qz-add-question').onclick = ()=>{
+    syncFromDom();
+    builderQuestions.push(blankQuestion());
+    renderBuilder();
+  };
+  modal.querySelector('#f-cancel').onclick = ()=> modal.remove();
+  modal.querySelector('#f-save').onclick = async ()=>{
+    syncFromDom();
+    const title = modal.querySelector('#qz-title').value.trim();
+    if(!title){ alert('Give the quiz a title.'); return; }
+    for(const q of builderQuestions){
+      if(!q.questionText.trim()){ alert('Every question needs question text.'); return; }
+      if(q.type === 'mc'){
+        q.options = q.options.filter(o=> o.trim() !== '');
+        if(q.options.length < 2){ alert(`"${q.questionText}" needs at least 2 options.`); return; }
+        if(!q.options.includes(q.correctAnswer)){ alert(`The correct answer for "${q.questionText}" must exactly match one of its options.`); return; }
+      } else if(!q.correctAnswer.trim()){
+        alert(`Add a correct answer for "${q.questionText}".`);
+        return;
+      }
+      if(!q.maxAttempts || q.maxAttempts < 1) q.maxAttempts = 1;
+    }
+    await db.collection('classes').doc(classId).collection('quizzes').add({
+      title,
+      questions: builderQuestions,
+      createdAt: firebase.firestore.FieldValue.serverTimestamp()
+    });
+    modal.remove();
+  };
+}
+
+async function openQuizResultsModal(quizId){
+  const quiz = quizzes.find(q=> q.id === quizId);
+  const respSnap = await db.collection('classes').doc(classId).collection('quizzes').doc(quizId).collection('responses').get();
+
+  let body;
+  if(respSnap.empty){
+    body = '<p class="meta">No responses yet.</p>';
+  }else{
+    let rows = '';
+    respSnap.docs.forEach(d=>{
+      const r = d.data();
+      rows += `<tr><td style="padding:6px;font-weight:600;">${escapeHtml(r.studentName)}</td>`;
+      quiz.questions.forEach(q=>{
+        const a = r.answers && r.answers[q.id];
+        if(!a || !a.attempts || a.attempts.length === 0){
+          rows += `<td style="padding:6px;" class="meta">—</td>`;
+          return;
+        }
+        const used = a.attempts.length;
+        let tag;
+        if(a.solved) tag = `<span class="feedback correct" style="margin:0;">correct (${used})</span>`;
+        else if(used >= q.maxAttempts) tag = `<span class="feedback revealed" style="margin:0;">revealed (${used})</span>`;
+        else tag = `<span class="feedback incorrect" style="margin:0;">trying (${used})</span>`;
+        rows += `<td style="padding:6px;">${tag}</td>`;
+      });
+      rows += `</tr>`;
+    });
+    body = `<div style="max-height:360px;overflow:auto;"><table style="width:100%;font-size:12px;border-collapse:collapse;">
+      <thead><tr><th style="text-align:left;padding:6px;">Student</th>${quiz.questions.map((q, i)=> `<th style="text-align:left;padding:6px;">Q${i + 1}</th>`).join('')}</tr></thead>
+      <tbody>${rows}</tbody></table></div>`;
+  }
+
+  const modal = openModal(`<h3>Results — ${escapeHtml(quiz.title)}</h3>${body}<div class="form-actions"><button class="btn" id="f-close">Close</button></div>`);
   modal.querySelector('#f-close').onclick = ()=> modal.remove();
 }
 
