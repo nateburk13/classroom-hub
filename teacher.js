@@ -161,9 +161,10 @@ function teardownListeners(){
   if(unsubAnnouncements) unsubAnnouncements();
   if(unsubQuizzes) unsubQuizzes();
   if(unsubBooks) unsubBooks();
-  unsubAssignments = unsubAnnouncements = unsubQuizzes = unsubBooks = null;
-  assignments = []; announcements = []; quizzes = []; books = [];
-  loaded = { assignments: false, announcements: false, quizzes: false, books: false };
+  if(unsubPresence) unsubPresence();
+  unsubAssignments = unsubAnnouncements = unsubQuizzes = unsubBooks = unsubPresence = null;
+  assignments = []; announcements = []; quizzes = []; books = []; presence = [];
+  loaded = { assignments: false, announcements: false, quizzes: false, books: false, students: false };
 }
 
 /* --------------------------- 2. STATE --------------------------- */
@@ -178,7 +179,10 @@ let assignments = [];
 let announcements = [];
 let quizzes = [];
 let books = [];
-let loaded = { assignments: false, announcements: false, quizzes: false, books: false };
+let presence = [];
+let unsubPresence = null;
+let loaded = { assignments: false, announcements: false, quizzes: false, books: false, students: false };
+const PRESENCE_ONLINE_MS = 60000; // no heartbeat within this window = shown offline
 
 function startApp(id, info){
   classId = id;
@@ -235,6 +239,14 @@ function startApp(id, info){
       render();
       markSynced(true);
     }, ()=> markSynced(false));
+
+  unsubPresence = db.collection('classes').doc(classId).collection('presence')
+    .onSnapshot((snap)=>{
+      presence = snap.docs.map(d=>({ id:d.id, ...d.data() }));
+      loaded.students = true;
+      render();
+      markSynced(true);
+    }, ()=> markSynced(false));
 }
 
 function markSynced(ok){
@@ -287,7 +299,7 @@ const viewRoot = document.getElementById('view-root');
 
 function render(){
   document.querySelectorAll('.nav-btn').forEach(b=> b.classList.toggle('active', b.dataset.view === currentView));
-  const renderers = { dashboard: renderDashboard, assignments: renderAssignments, announcements: renderAnnouncements, quizzes: renderQuizzes, books: renderBooks };
+  const renderers = { dashboard: renderDashboard, assignments: renderAssignments, announcements: renderAnnouncements, quizzes: renderQuizzes, books: renderBooks, students: renderStudents };
   (renderers[currentView] || renderDashboard)();
 }
 
@@ -324,7 +336,17 @@ function renderDashboard(){
       <p class="body-text">${escapeHtml(recentAnnouncement.body)}</p>
       <div class="meta">${timeAgo(tsVal(recentAnnouncement.postedAt))}</div>`;
   }
-  html += `</div></div>`;
+  html += `</div>`;
+  html += `</div>`;
+
+  html += `<div class="card"><h3>Students</h3>`;
+  if(!loaded.students){ html += `<p class="meta">Loading…</p>`; }
+  else{
+    const onlineCount = presence.filter(isOnline).length;
+    html += `<p class="meta">${onlineCount} of ${presence.length} student${presence.length===1?'':'s'} online now.</p>
+      <button class="btn small" id="btn-view-students" style="margin-top:8px;">View students</button>`;
+  }
+  html += `</div>`;
 
   html += `<div class="card"><h3>Share with your class</h3>
     <p class="meta">Students join at the student page and pick this class from the list by name:</p>
@@ -332,6 +354,8 @@ function renderDashboard(){
   </div>`;
 
   viewRoot.innerHTML = html;
+  const viewStudentsBtn = document.getElementById('btn-view-students');
+  if(viewStudentsBtn) viewStudentsBtn.onclick = ()=>{ currentView = 'students'; render(); };
 }
 
 function renderAssignments(){
@@ -481,6 +505,45 @@ function renderBooks(){
   viewRoot.querySelectorAll('[data-book-view]').forEach(b=> b.onclick = ()=> openBookViewer(b.dataset.bookView));
   viewRoot.querySelectorAll('[data-book-toc]').forEach(b=> b.onclick = ()=> openBookTocModal(b.dataset.bookToc));
   viewRoot.querySelectorAll('[data-book-delete]').forEach(b=> b.onclick = ()=> deleteBook(b.dataset.bookDelete));
+}
+
+function isOnline(p){ return (Date.now() - tsVal(p.lastSeen)) < PRESENCE_ONLINE_MS; }
+
+function renderStudents(){
+  setHeader('Students', 'Who has this class open right now, and when they were last active.');
+
+  if(!loaded.students){
+    viewRoot.innerHTML = `<div class="empty"><h3>Loading students…</h3><p>Connecting to your class.</p></div>`;
+    return;
+  }
+  if(presence.length === 0){
+    viewRoot.innerHTML = `<div class="empty"><h3>No students have joined yet</h3><p>Once a student opens the class on their device, they'll show up here.</p></div>`;
+    return;
+  }
+
+  const sorted = [...presence].sort((a,b)=>{
+    const aOn = isOnline(a), bOn = isOnline(b);
+    if(aOn !== bOn) return aOn ? -1 : 1;
+    return tsVal(b.lastSeen) - tsVal(a.lastSeen);
+  });
+  const onlineCount = sorted.filter(isOnline).length;
+
+  let html = `<p class="meta" style="margin-bottom:14px;">${onlineCount} of ${sorted.length} student${sorted.length===1?'':'s'} online now.</p>`;
+  sorted.forEach(p=>{
+    const online = isOnline(p);
+    html += `<div class="card">
+      <div class="card-row" style="align-items:center;">
+        <div style="display:flex;align-items:center;gap:10px;">
+          <span class="dot" style="width:9px;height:9px;border-radius:50%;background:${online ? '#5DCAA5' : 'var(--slate-light)'};display:inline-block;flex-shrink:0;"></span>
+          <div>
+            <div style="font-weight:600;font-size:13px;">${escapeHtml(p.studentName || '(unnamed)')}</div>
+            <div class="meta">${online ? 'Online now' : `Last active ${timeAgo(tsVal(p.lastSeen))}`}</div>
+          </div>
+        </div>
+      </div>
+    </div>`;
+  });
+  viewRoot.innerHTML = html;
 }
 
 /* --------------------------- 4. ACTIONS --------------------------- */
@@ -1201,6 +1264,13 @@ document.querySelectorAll('.nav-btn').forEach(btn=>{
 /* Note: the "leave/remove class" and "add another class" controls live in
    the sidebar's class-switcher box, which is rebuilt by renderClassSwitcher()
    on every startApp()/switchToClass() call, so they're wired there instead. */
+
+/* Presence timestamps only change on the student's next heartbeat, so
+   without this, someone who closes their tab would still show "online"
+   until an unrelated Firestore update happened to trigger a re-render. */
+setInterval(()=>{
+  if(currentView === 'students' || currentView === 'dashboard') render();
+}, 15000);
 
 /* --------------------------- 8. INIT --------------------------- */
 initGate();

@@ -109,9 +109,33 @@ function teardownListeners(){
   if(unsubQuizzes) unsubQuizzes();
   if(unsubBooks) unsubBooks();
   unsubAssignments = unsubAnnouncements = unsubQuizzes = unsubBooks = null;
+  stopPresence();
   assignments = []; announcements = []; quizzes = []; books = [];
   mySubmissions = {}; myQuizResponses = {}; selectedMcAnswer = {};
   loaded = { assignments: false, announcements: false, quizzes: false, books: false };
+}
+
+/* Lightweight presence: write a "last seen" timestamp on a per-student doc
+   every ~25s so the teacher can tell who's online (recent heartbeat) vs.
+   who's been away a while (stale heartbeat), plus when they were last here. */
+function touchPresence(){
+  if(!classId) return;
+  db.collection('classes').doc(classId).collection('presence').doc(studentDocId())
+    .set({ studentName, lastSeen: firebase.firestore.FieldValue.serverTimestamp() }, { merge: true })
+    .catch(()=>{ /* best-effort — a missed heartbeat just means we look offline sooner */ });
+}
+function startPresence(){
+  stopPresence();
+  touchPresence();
+  presenceInterval = setInterval(touchPresence, PRESENCE_HEARTBEAT_MS);
+  document.addEventListener('visibilitychange', onVisibilityChangeForPresence);
+}
+function stopPresence(){
+  if(presenceInterval){ clearInterval(presenceInterval); presenceInterval = null; }
+  document.removeEventListener('visibilitychange', onVisibilityChangeForPresence);
+}
+function onVisibilityChangeForPresence(){
+  if(!document.hidden) touchPresence(); // coming back to the tab counts as "here now"
 }
 
 /* --------------------------- 2. STATE --------------------------- */
@@ -128,6 +152,8 @@ let myQuizResponses = {}; // quizId -> { studentName, answers: { questionId: { a
 let selectedMcAnswer = {}; // "quizId-questionId" -> chosen option text (before submit)
 let loaded = { assignments: false, announcements: false, quizzes: false, books: false };
 let unsubAssignments = null, unsubAnnouncements = null, unsubQuizzes = null, unsubBooks = null;
+let presenceInterval = null;
+const PRESENCE_HEARTBEAT_MS = 25000; // how often we tell the teacher we're still here
 
 function studentDocId(){
   // stable, readable doc id derived from the student's name
@@ -143,6 +169,7 @@ function startApp(id, info, name){
   document.getElementById('who-name').textContent = studentName;
   document.getElementById('who-avatar').textContent = initials(studentName);
   renderClassSwitcher();
+  startPresence();
 
   unsubAssignments = db.collection('classes').doc(classId).collection('assignments')
     .onSnapshot(async (snap)=>{
