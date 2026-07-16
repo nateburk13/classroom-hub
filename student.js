@@ -5,49 +5,113 @@
    ========================================================================= */
 
 /* --------------------------- 1. GATE --------------------------- */
-const LS_CLASS_ID = 'classroom-hub-student-class-id';
-const LS_STUDENT_NAME = 'classroom-hub-student-name';
+// Multi-class storage: LS_CLASSES holds every class this student has joined
+// on this device ([{id, className, studentName}]); LS_ACTIVE_CLASS remembers
+// which one was open last. Students no longer type a join code — they pick
+// their class by (unique) name from a dropdown of classes that exist.
+const LS_CLASSES = 'classroom-hub-student-classes';
+const LS_ACTIVE_CLASS = 'classroom-hub-student-active-class';
+
+function getStoredClasses(){
+  try{ return JSON.parse(localStorage.getItem(LS_CLASSES) || '[]'); }catch(e){ return []; }
+}
+function saveStoredClasses(list){ localStorage.setItem(LS_CLASSES, JSON.stringify(list)); }
+function upsertStoredClass(id, className, name){
+  const list = getStoredClasses();
+  const i = list.findIndex(c=> c.id === id);
+  if(i >= 0){ list[i].className = className; if(name) list[i].studentName = name; }
+  else list.push({ id, className, studentName: name });
+  saveStoredClasses(list);
+}
+function removeStoredClass(id){ saveStoredClasses(getStoredClasses().filter(c=> c.id !== id)); }
+function setActiveClass(id){ localStorage.setItem(LS_ACTIVE_CLASS, id); }
+function getActiveClass(){ return localStorage.getItem(LS_ACTIVE_CLASS); }
 
 async function initGate(){
-  const savedId = localStorage.getItem(LS_CLASS_ID);
-  const savedName = localStorage.getItem(LS_STUDENT_NAME);
-  if(savedId && savedName){
-    const doc = await db.collection('classes').doc(savedId).get();
-    if(doc.exists){ startApp(savedId, doc.data(), savedName); return; }
-    localStorage.removeItem(LS_CLASS_ID);
-    localStorage.removeItem(LS_STUDENT_NAME);
+  const list = getStoredClasses();
+  const entry = list.find(c=> c.id === getActiveClass()) || list[0];
+  if(entry){
+    const doc = await db.collection('classes').doc(entry.id).get();
+    if(doc.exists){ setActiveClass(entry.id); startApp(entry.id, doc.data(), entry.studentName); return; }
+    removeStoredClass(entry.id);
+    return initGate();
   }
   showJoinGate();
 }
 
-function showJoinGate(){
+async function showJoinGate(fromSwitcher){
   document.getElementById('gate').innerHTML = `
     <div class="gate-card">
       <div class="mark">CH</div>
-      <h2>Join your class</h2>
-      <p>Ask your teacher for the class join code.</p>
-      <div class="field"><label>Class code</label><input id="g-code" class="mono" placeholder="e.g. K7P2QX" style="text-transform:uppercase;letter-spacing:.08em;"></div>
+      <h2>Join a class</h2>
+      <p>Pick your class from the list below — no join code needed.</p>
+      <div class="field"><label>Class</label><select id="g-class"><option value="">Loading classes…</option></select></div>
       <div class="field"><label>Your name</label><input id="g-name" placeholder="Full name"></div>
       <button class="btn primary" id="g-submit" style="width:100%;">Join class</button>
       <div class="gate-error" id="g-error"></div>
+      ${fromSwitcher ? '<p class="meta" style="text-align:center;margin-top:16px;"><a href="#" id="g-back">‹ Back to my class</a></p>' : ''}
     </div>`;
+  if(fromSwitcher){
+    document.getElementById('g-back').onclick = (e)=>{ e.preventDefault(); document.getElementById('gate').classList.add('hidden'); document.getElementById('app').classList.remove('hidden'); };
+  }
+  const select = document.getElementById('g-class');
+  try{
+    const snap = await db.collection('classes').orderBy('className').get();
+    const already = getStoredClasses().map(c=> c.id);
+    const opts = snap.docs.filter(d=> !already.includes(d.id)).map(d=> `<option value="${d.id}">${escapeHtml(d.data().className)}</option>`).join('');
+    select.innerHTML = opts || '<option value="">No classes available yet</option>';
+  }catch(e){
+    select.innerHTML = '<option value="">Could not load classes</option>';
+  }
   document.getElementById('g-submit').onclick = async ()=>{
-    const code = document.getElementById('g-code').value.trim().toUpperCase();
+    const id = select.value;
     const name = document.getElementById('g-name').value.trim();
     const err = document.getElementById('g-error');
-    if(!code || !name){ err.textContent = 'Fill in both fields to continue.'; return; }
-    err.textContent = 'Looking up class…';
+    if(!id || !name){ err.textContent = 'Choose a class and enter your name to continue.'; return; }
+    err.textContent = 'Joining…';
     try{
-      const snap = await db.collection('classes').where('code','==',code).limit(1).get();
-      if(snap.empty){ err.textContent = 'No class found with that code. Double-check with your teacher.'; return; }
-      const doc = snap.docs[0];
-      localStorage.setItem(LS_CLASS_ID, doc.id);
-      localStorage.setItem(LS_STUDENT_NAME, name);
-      startApp(doc.id, doc.data(), name);
+      const doc = await db.collection('classes').doc(id).get();
+      if(!doc.exists){ err.textContent = 'That class no longer exists.'; return; }
+      if(fromSwitcher) teardownListeners();
+      upsertStoredClass(id, doc.data().className, name);
+      setActiveClass(id);
+      startApp(id, doc.data(), name);
     }catch(e){
       err.textContent = 'Could not reach the database. Check firebase-config.js is filled in correctly.';
     }
   };
+}
+
+/* Switch between classes already joined on this device, or load one fresh
+   right after joining it. */
+async function switchToClass(id){
+  if(id === classId) return;
+  const entry = getStoredClasses().find(c=> c.id === id);
+  teardownListeners();
+  setActiveClass(id);
+  const doc = await db.collection('classes').doc(id).get();
+  if(!doc.exists){
+    removeStoredClass(id);
+    const remaining = getStoredClasses();
+    if(remaining.length) return switchToClass(remaining[0].id);
+    classId = null; classInfo = null;
+    document.getElementById('app').classList.add('hidden');
+    document.getElementById('gate').classList.remove('hidden');
+    showJoinGate();
+    return;
+  }
+  startApp(id, doc.data(), entry ? entry.studentName : studentName);
+}
+
+function teardownListeners(){
+  if(unsubAssignments) unsubAssignments();
+  if(unsubAnnouncements) unsubAnnouncements();
+  if(unsubQuizzes) unsubQuizzes();
+  if(unsubBooks) unsubBooks();
+  unsubAssignments = unsubAnnouncements = unsubQuizzes = unsubBooks = null;
+  assignments = []; announcements = []; quizzes = []; books = [];
+  mySubmissions = {}; myQuizResponses = {}; selectedMcAnswer = {};
+  loaded = { assignments: false, announcements: false, quizzes: false, books: false };
 }
 
 /* --------------------------- 2. STATE --------------------------- */
@@ -63,6 +127,7 @@ let mySubmissions = {}; // assignmentId -> { text, submittedAt }
 let myQuizResponses = {}; // quizId -> { studentName, answers: { questionId: { attempts:[], solved } } }
 let selectedMcAnswer = {}; // "quizId-questionId" -> chosen option text (before submit)
 let loaded = { assignments: false, announcements: false, quizzes: false, books: false };
+let unsubAssignments = null, unsubAnnouncements = null, unsubQuizzes = null, unsubBooks = null;
 
 function studentDocId(){
   // stable, readable doc id derived from the student's name
@@ -71,13 +136,15 @@ function studentDocId(){
 
 function startApp(id, info, name){
   classId = id; classInfo = info; studentName = name;
+  upsertStoredClass(id, info.className, name);
+  setActiveClass(id);
   document.getElementById('gate').classList.add('hidden');
   document.getElementById('app').classList.remove('hidden');
-  document.getElementById('class-name-display').textContent = info.className;
   document.getElementById('who-name').textContent = studentName;
   document.getElementById('who-avatar').textContent = initials(studentName);
+  renderClassSwitcher();
 
-  db.collection('classes').doc(classId).collection('assignments')
+  unsubAssignments = db.collection('classes').doc(classId).collection('assignments')
     .onSnapshot(async (snap)=>{
       assignments = snap.docs.map(d=>({ id:d.id, ...d.data() }));
       for(const a of assignments){
@@ -90,7 +157,7 @@ function startApp(id, info, name){
       markSynced(true);
     }, ()=> markSynced(false));
 
-  db.collection('classes').doc(classId).collection('announcements')
+  unsubAnnouncements = db.collection('classes').doc(classId).collection('announcements')
     .onSnapshot((snap)=>{
       announcements = snap.docs.map(d=>({ id:d.id, ...d.data() }));
       loaded.announcements = true;
@@ -98,7 +165,7 @@ function startApp(id, info, name){
       markSynced(true);
     }, ()=> markSynced(false));
 
-  db.collection('classes').doc(classId).collection('quizzes')
+  unsubQuizzes = db.collection('classes').doc(classId).collection('quizzes')
     .onSnapshot(async (snap)=>{
       quizzes = snap.docs.map(d=>({ id:d.id, ...d.data() }));
       for(const q of quizzes){
@@ -111,7 +178,7 @@ function startApp(id, info, name){
       markSynced(true);
     }, ()=> markSynced(false));
 
-  db.collection('classes').doc(classId).collection('books')
+  unsubBooks = db.collection('classes').doc(classId).collection('books')
     .onSnapshot((snap)=>{
       books = snap.docs.map(d=>({ id:d.id, ...d.data() }))
         .sort((a,b)=> tsVal(b.createdAt)-tsVal(a.createdAt));
@@ -126,6 +193,44 @@ function markSynced(ok){
   const label = document.getElementById('sync-label');
   if(ok){ dot.classList.remove('offline'); label.textContent = 'Live-synced with teacher'; }
   else{ dot.classList.add('offline'); label.textContent = 'Connection issue — check network'; }
+}
+
+/* Sidebar class switcher: dropdown of every class this student has joined
+   on this device, plus quick actions to join another or leave the current one. */
+function renderClassSwitcher(){
+  const list = getStoredClasses();
+  const box = document.querySelector('.class-code-box');
+  box.innerHTML = `
+    <label>Class</label>
+    <select id="class-switcher" style="margin-bottom:8px;">
+      ${list.map(c=> `<option value="${c.id}" ${c.id===classId?'selected':''}>${escapeHtml(c.className)}</option>`).join('')}
+      <option value="__add__">+ Join another class</option>
+    </select>
+    <div class="sync-dot"><span class="dot" id="sync-dot"></span><span id="sync-label">Connecting…</span></div>
+    <button class="btn small" id="btn-leave-class" style="width:100%;margin-top:10px;">Leave this class</button>
+  `;
+  document.getElementById('class-switcher').onchange = (e)=>{
+    const v = e.target.value;
+    if(v === '__add__'){
+      e.target.value = classId;
+      document.getElementById('app').classList.add('hidden');
+      document.getElementById('gate').classList.remove('hidden');
+      showJoinGate(true);
+      return;
+    }
+    switchToClass(v);
+  };
+  document.getElementById('btn-leave-class').onclick = ()=>{
+    if(!confirm(`Leave "${classInfo.className}" on this device? You can rejoin any time by picking it from the list again.`)) return;
+    removeStoredClass(classId);
+    teardownListeners();
+    const remaining = getStoredClasses();
+    if(remaining.length){ switchToClass(remaining[0].id); return; }
+    classId = null; classInfo = null;
+    document.getElementById('app').classList.add('hidden');
+    document.getElementById('gate').classList.remove('hidden');
+    showJoinGate();
+  };
 }
 
 /* --------------------------- 3. RENDERERS --------------------------- */
@@ -568,12 +673,9 @@ function timeAgo(ts){
 document.querySelectorAll('.nav-btn').forEach(btn=>{
   btn.addEventListener('click', ()=>{ currentView = btn.dataset.view; render(); });
 });
-document.getElementById('btn-leave-class').addEventListener('click', ()=>{
-  if(!confirm('Leave this class on this device? You can rejoin any time with the class code.')) return;
-  localStorage.removeItem(LS_CLASS_ID);
-  localStorage.removeItem(LS_STUDENT_NAME);
-  location.reload();
-});
+/* Note: the "leave class" and "join another class" controls live in the
+   sidebar's class-switcher box, rebuilt by renderClassSwitcher() on every
+   startApp()/switchToClass() call, so they're wired there instead. */
 
 /* --------------------------- 8. INIT --------------------------- */
 initGate();

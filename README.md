@@ -48,10 +48,11 @@ You can also open both files directly from disk to test locally, but a couple of
 
 ## 4. How it works day to day
 
-1. Teacher opens `teacher.html`, fills in class name + their name → gets a 6-character join code.
-2. Students open `student.html`, enter that code + their name → they're in.
-3. Anything the teacher posts (assignment, announcement) appears on every student's device within a second or two, and any student submission appears on the teacher's device the same way — no refresh needed.
-4. Each device remembers who it is (via the browser's local storage), so reopening the page skips straight back into the class.
+1. Teacher opens `teacher.html` and creates a class with a **unique class name** (no two classes anywhere can share a name) plus a password. There's no join code to hand out — students find the class by name.
+2. Students open `student.html` and pick that class name from a dropdown, then enter their name → they're in.
+3. Anything the teacher posts (assignment, announcement, quiz, book) appears on every student's device within a second or two, and any student submission appears on the teacher's device the same way — no refresh needed.
+4. Each device remembers every class it's part of. A **class switcher dropdown** in the sidebar lets a teacher or student flip between multiple classes on the same device, or join/create another one, without losing their place in the others.
+5. Teachers can log into a class they created on a different device using the class name + the password they set when creating it.
 
 ## Security note
 

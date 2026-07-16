@@ -5,7 +5,27 @@
    ========================================================================= */
 
 /* --------------------------- 1. GATE --------------------------- */
-const LS_CLASS_ID = 'classroom-hub-teacher-class-id';
+// Multi-class storage: LS_CLASSES holds every class this teacher manages on
+// this device ([{id, className}]); LS_ACTIVE_CLASS remembers which one was
+// open last. A join "code" is still generated and stored per-class for
+// backward compatibility, but the UI never shows it — teachers and students
+// both identify a class by its (unique) name instead.
+const LS_CLASSES = 'classroom-hub-teacher-classes';
+const LS_ACTIVE_CLASS = 'classroom-hub-teacher-active-class';
+
+function getStoredClasses(){
+  try{ return JSON.parse(localStorage.getItem(LS_CLASSES) || '[]'); }catch(e){ return []; }
+}
+function saveStoredClasses(list){ localStorage.setItem(LS_CLASSES, JSON.stringify(list)); }
+function upsertStoredClass(id, className){
+  const list = getStoredClasses();
+  const i = list.findIndex(c=> c.id === id);
+  if(i >= 0) list[i].className = className; else list.push({ id, className });
+  saveStoredClasses(list);
+}
+function removeStoredClass(id){ saveStoredClasses(getStoredClasses().filter(c=> c.id !== id)); }
+function setActiveClass(id){ localStorage.setItem(LS_ACTIVE_CLASS, id); }
+function getActiveClass(){ return localStorage.getItem(LS_ACTIVE_CLASS); }
 
 function makeClassCode(){
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no ambiguous chars
@@ -21,28 +41,35 @@ async function hashPasscode(str){
 }
 
 async function initGate(){
-  const savedId = localStorage.getItem(LS_CLASS_ID);
-  if(savedId){
-    const doc = await db.collection('classes').doc(savedId).get();
-    if(doc.exists){ startApp(savedId, doc.data()); return; }
-    localStorage.removeItem(LS_CLASS_ID);
+  const list = getStoredClasses();
+  const tryId = getActiveClass() || (list[0] && list[0].id);
+  if(tryId){
+    const doc = await db.collection('classes').doc(tryId).get();
+    if(doc.exists){ startApp(tryId, doc.data()); return; }
+    removeStoredClass(tryId);
+    return initGate();
   }
   showCreateGate();
 }
 
-function showCreateGate(){
+function showCreateGate(fromSwitcher){
   document.getElementById('gate').innerHTML = `
     <div class="gate-card">
       <div class="mark">CH</div>
       <h2>Set up your class</h2>
-      <p>This creates a join code your students will use to see assignments and announcements in real time. The password lets you manage this class from other devices later.</p>
+      <p>Choose a unique class name — students pick it from a list, no join code to share. The password lets you manage this class from other devices later.</p>
       <div class="field"><label>Class name</label><input id="g-class" placeholder="Period 3 — Biology"></div>
       <div class="field"><label>Your name</label><input id="g-teacher" placeholder="Ms. Alvarez"></div>
       <div class="field"><label>Set a teacher password</label><input id="g-password" type="password" placeholder="Something only you know"></div>
       <button class="btn primary" id="g-submit" style="width:100%;">Create class</button>
       <div class="gate-error" id="g-error"></div>
-      <p class="meta" style="text-align:center;margin-top:16px;">Already have a class? <a href="#" id="g-switch-resume">Log in on this device</a></p>
+      <p class="meta" style="text-align:center;margin-top:16px;">
+        ${fromSwitcher ? '<a href="#" id="g-back">‹ Back to my class</a> · ' : ''}<a href="#" id="g-switch-resume">Log in to a class from another device</a>
+      </p>
     </div>`;
+  if(fromSwitcher){
+    document.getElementById('g-back').onclick = (e)=>{ e.preventDefault(); document.getElementById('gate').classList.add('hidden'); document.getElementById('app').classList.remove('hidden'); };
+  }
   document.getElementById('g-submit').onclick = async ()=>{
     const className = document.getElementById('g-class').value.trim();
     const teacherName = document.getElementById('g-teacher').value.trim();
@@ -50,56 +77,93 @@ function showCreateGate(){
     const err = document.getElementById('g-error');
     if(!className || !teacherName || !password){ err.textContent = 'Fill in all fields to continue.'; return; }
     if(password.length < 4){ err.textContent = 'Password should be at least 4 characters.'; return; }
-    err.textContent = 'Creating class…';
+    err.textContent = 'Checking class name…';
     try{
+      const dupe = await db.collection('classes').where('className','==',className).limit(1).get();
+      if(!dupe.empty){ err.textContent = 'That class name is already taken — please choose another.'; return; }
+      err.textContent = 'Creating class…';
       const code = makeClassCode();
       const passcodeHash = await hashPasscode(password);
       const ref = await db.collection('classes').add({
         className, teacherName, code, passcodeHash, createdAt: firebase.firestore.FieldValue.serverTimestamp()
       });
-      localStorage.setItem(LS_CLASS_ID, ref.id);
       const doc = await ref.get();
+      if(fromSwitcher) teardownListeners();
+      upsertStoredClass(ref.id, className);
+      setActiveClass(ref.id);
       startApp(ref.id, doc.data());
     }catch(e){
       err.textContent = 'Could not reach the database. Check firebase-config.js is filled in correctly.';
     }
   };
-  document.getElementById('g-switch-resume').onclick = (e)=>{ e.preventDefault(); showResumeGate(); };
+  document.getElementById('g-switch-resume').onclick = (e)=>{ e.preventDefault(); showResumeGate(fromSwitcher); };
 }
 
-function showResumeGate(){
+function showResumeGate(fromSwitcher){
   document.getElementById('gate').innerHTML = `
     <div class="gate-card">
       <div class="mark">CH</div>
       <h2>Log in to your class</h2>
-      <p>Enter your class join code and the teacher password you set when you created it.</p>
-      <div class="field"><label>Class code</label><input id="r-code" class="mono" placeholder="e.g. K7P2QX" style="text-transform:uppercase;letter-spacing:.08em;"></div>
+      <p>Enter the class name and the teacher password you set when you created it.</p>
+      <div class="field"><label>Class name</label><input id="r-class" placeholder="Period 3 — Biology"></div>
       <div class="field"><label>Teacher password</label><input id="r-password" type="password" placeholder="Your password"></div>
       <button class="btn primary" id="r-submit" style="width:100%;">Log in</button>
       <div class="gate-error" id="r-error"></div>
       <p class="meta" style="text-align:center;margin-top:16px;">New here? <a href="#" id="r-switch-create">Create a class instead</a></p>
     </div>`;
   document.getElementById('r-submit').onclick = async ()=>{
-    const code = document.getElementById('r-code').value.trim().toUpperCase();
+    const className = document.getElementById('r-class').value.trim();
     const password = document.getElementById('r-password').value;
     const err = document.getElementById('r-error');
-    if(!code || !password){ err.textContent = 'Fill in both fields to continue.'; return; }
+    if(!className || !password){ err.textContent = 'Fill in both fields to continue.'; return; }
     err.textContent = 'Checking…';
     try{
-      const snap = await db.collection('classes').where('code','==',code).limit(1).get();
-      if(snap.empty){ err.textContent = 'No class found with that code.'; return; }
+      const snap = await db.collection('classes').where('className','==',className).limit(1).get();
+      if(snap.empty){ err.textContent = 'No class found with that name.'; return; }
       const doc = snap.docs[0];
       const info = doc.data();
       if(!info.passcodeHash){ err.textContent = 'This class has no password set — it was created before this feature existed.'; return; }
       const hash = await hashPasscode(password);
       if(hash !== info.passcodeHash){ err.textContent = 'Incorrect password.'; return; }
-      localStorage.setItem(LS_CLASS_ID, doc.id);
+      if(fromSwitcher) teardownListeners();
+      upsertStoredClass(doc.id, info.className);
+      setActiveClass(doc.id);
       startApp(doc.id, info);
     }catch(e){
       err.textContent = 'Could not reach the database. Check firebase-config.js is filled in correctly.';
     }
   };
-  document.getElementById('r-switch-create').onclick = (e)=>{ e.preventDefault(); showCreateGate(); };
+  document.getElementById('r-switch-create').onclick = (e)=>{ e.preventDefault(); showCreateGate(fromSwitcher); };
+}
+
+/* Switch between classes already stored on this device, or load one fresh
+   (e.g. right after creating/logging into it). */
+async function switchToClass(id){
+  if(id === classId) return;
+  teardownListeners();
+  setActiveClass(id);
+  const doc = await db.collection('classes').doc(id).get();
+  if(!doc.exists){
+    removeStoredClass(id);
+    const remaining = getStoredClasses();
+    if(remaining.length) return switchToClass(remaining[0].id);
+    classId = null; classInfo = null;
+    document.getElementById('app').classList.add('hidden');
+    document.getElementById('gate').classList.remove('hidden');
+    showCreateGate();
+    return;
+  }
+  startApp(id, doc.data());
+}
+
+function teardownListeners(){
+  if(unsubAssignments) unsubAssignments();
+  if(unsubAnnouncements) unsubAnnouncements();
+  if(unsubQuizzes) unsubQuizzes();
+  if(unsubBooks) unsubBooks();
+  unsubAssignments = unsubAnnouncements = unsubQuizzes = unsubBooks = null;
+  assignments = []; announcements = []; quizzes = []; books = [];
+  loaded = { assignments: false, announcements: false, quizzes: false, books: false };
 }
 
 /* --------------------------- 2. STATE --------------------------- */
@@ -119,11 +183,13 @@ let loaded = { assignments: false, announcements: false, quizzes: false, books: 
 function startApp(id, info){
   classId = id;
   classInfo = info;
+  upsertStoredClass(id, info.className);
+  setActiveClass(id);
   document.getElementById('gate').classList.add('hidden');
   document.getElementById('app').classList.remove('hidden');
-  document.getElementById('class-code-display').textContent = info.code;
   document.getElementById('who-name').textContent = info.teacherName;
   document.getElementById('who-avatar').textContent = initials(info.teacherName);
+  renderClassSwitcher();
 
   unsubAssignments = db.collection('classes').doc(classId).collection('assignments')
     .onSnapshot(async (snap)=>{
@@ -178,6 +244,44 @@ function markSynced(ok){
   else{ dot.classList.add('offline'); label.textContent = 'Connection issue — check network'; }
 }
 
+/* Sidebar class switcher: dropdown of every class this teacher manages on
+   this device, plus quick actions to add another or remove the current one. */
+function renderClassSwitcher(){
+  const list = getStoredClasses();
+  const box = document.querySelector('.class-code-box');
+  box.innerHTML = `
+    <label>Class</label>
+    <select id="class-switcher" style="margin-bottom:8px;">
+      ${list.map(c=> `<option value="${c.id}" ${c.id===classId?'selected':''}>${escapeHtml(c.className)}</option>`).join('')}
+      <option value="__add__">+ Add another class</option>
+    </select>
+    <div class="sync-dot"><span class="dot" id="sync-dot"></span><span id="sync-label">Connecting…</span></div>
+    <button class="btn small" id="btn-leave-class" style="width:100%;margin-top:10px;">Remove this class</button>
+  `;
+  document.getElementById('class-switcher').onchange = (e)=>{
+    const v = e.target.value;
+    if(v === '__add__'){
+      e.target.value = classId;
+      document.getElementById('app').classList.add('hidden');
+      document.getElementById('gate').classList.remove('hidden');
+      showCreateGate(true);
+      return;
+    }
+    switchToClass(v);
+  };
+  document.getElementById('btn-leave-class').onclick = ()=>{
+    if(!confirm(`Remove "${classInfo.className}" from this device? Your class data stays saved — you can log back in any time with the class name and password.`)) return;
+    removeStoredClass(classId);
+    teardownListeners();
+    const remaining = getStoredClasses();
+    if(remaining.length){ switchToClass(remaining[0].id); return; }
+    classId = null; classInfo = null;
+    document.getElementById('app').classList.add('hidden');
+    document.getElementById('gate').classList.remove('hidden');
+    showCreateGate();
+  };
+}
+
 /* --------------------------- 3. RENDERERS --------------------------- */
 const viewRoot = document.getElementById('view-root');
 
@@ -223,8 +327,8 @@ function renderDashboard(){
   html += `</div></div>`;
 
   html += `<div class="card"><h3>Share with your class</h3>
-    <p class="meta">Students join at the student page and enter this code:</p>
-    <div class="mono" style="font-size:20px;font-weight:700;color:var(--amber-dark);letter-spacing:.1em;margin-top:6px;">${classInfo.code}</div>
+    <p class="meta">Students join at the student page and pick this class from the list by name:</p>
+    <div style="font-size:16px;font-weight:700;color:var(--amber-dark);margin-top:6px;">${escapeHtml(classInfo.className)}</div>
   </div>`;
 
   viewRoot.innerHTML = html;
@@ -1094,11 +1198,9 @@ function timeAgo(ts){
 document.querySelectorAll('.nav-btn').forEach(btn=>{
   btn.addEventListener('click', ()=>{ currentView = btn.dataset.view; render(); });
 });
-document.getElementById('btn-leave-class').addEventListener('click', ()=>{
-  if(!confirm('Stop managing this class on this device? Your data stays saved — you can rejoin by creating a class again is not needed, this only clears local access.')) return;
-  localStorage.removeItem(LS_CLASS_ID);
-  location.reload();
-});
+/* Note: the "leave/remove class" and "add another class" controls live in
+   the sidebar's class-switcher box, which is rebuilt by renderClassSwitcher()
+   on every startApp()/switchToClass() call, so they're wired there instead. */
 
 /* --------------------------- 8. INIT --------------------------- */
 initGate();
