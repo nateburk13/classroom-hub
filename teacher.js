@@ -854,19 +854,28 @@ function openBookUploadModal(){
       });
       let batch = db.batch();
       let opsInBatch = 0;
+      let batchBytes = 0;
       let pagesSaved = 0;
+      const MAX_BATCH_BYTES = 8 * 1024 * 1024; // stay safely under Firestore's 10MB batch limit
       for(let i = 1; i <= pageCount; i++){
         status.textContent = `Processing page ${i} of ${pageCount}…`;
         try{
           const dataUrl = await pdfPageToDataUrl(pdf, i, 1100);
+          const approxBytes = dataUrl.length; // close enough for a size budget
+          if((opsInBatch > 0 && batchBytes + approxBytes > MAX_BATCH_BYTES) || opsInBatch >= 400){
+            await batch.commit();
+            batch = db.batch();
+            opsInBatch = 0;
+            batchBytes = 0;
+          }
           batch.set(bookRef.collection('pages').doc(String(i).padStart(4,'0')), { index: i, dataUrl });
           opsInBatch++;
+          batchBytes += approxBytes;
           pagesSaved++;
         }catch(pageErr){
           // one bad page shouldn't sink the whole book — skip it and keep going
           console.error(`Page ${i} failed to render:`, pageErr);
         }
-        if(opsInBatch >= 400){ await batch.commit(); batch = db.batch(); opsInBatch = 0; }
       }
       if(opsInBatch > 0) await batch.commit();
       if(pagesSaved === 0){
