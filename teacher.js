@@ -60,9 +60,15 @@ function showCreateGate(fromSwitcher){
       <p>Choose a unique class name — students pick it from a list, no join code to share. The password lets you manage this class from other devices later.</p>
       <div class="field"><label>Class name</label><input id="g-class" placeholder="Period 3 — Biology"></div>
       <div class="field"><label>Your name</label><input id="g-teacher" placeholder="Ms. Alvarez"></div>
-      <div class="field"><label>Set a teacher password</label><input id="g-password" type="password" placeholder="Something only you know"></div>
+      <div class="field">
+        <label>Set a teacher password</label>
+        <input id="g-password" type="password" placeholder="Something only you know" autocomplete="new-password" aria-describedby="g-password-hint">
+        <div class="meta" id="g-password-hint" style="margin-top:4px;">At least 4 characters.</div>
+      </div>
+      <div class="field"><label>Security question (for password recovery)</label><input id="g-secq" placeholder="e.g. What street did you grow up on?"></div>
+      <div class="field"><label>Answer</label><input id="g-seca" placeholder="Your answer"></div>
       <button class="btn primary" id="g-submit" style="width:100%;">Create class</button>
-      <div class="gate-error" id="g-error"></div>
+      <div class="gate-error" id="g-error" role="alert"></div>
       <p class="meta" style="text-align:center;margin-top:16px;">
         ${fromSwitcher ? '<a href="#" id="g-back">‹ Back to my class</a> · ' : ''}<a href="#" id="g-switch-resume">Log in to a class from another device</a>
       </p>
@@ -70,12 +76,21 @@ function showCreateGate(fromSwitcher){
   if(fromSwitcher){
     document.getElementById('g-back').onclick = (e)=>{ e.preventDefault(); document.getElementById('gate').classList.add('hidden'); document.getElementById('app').classList.remove('hidden'); };
   }
+  const pwField = document.getElementById('g-password');
+  const pwHint = document.getElementById('g-password-hint');
+  pwField.addEventListener('input', ()=>{
+    if(pwField.value.length === 0){ pwHint.textContent = 'At least 4 characters.'; pwHint.style.color = 'var(--slate)'; }
+    else if(pwField.value.length < 4){ pwHint.textContent = `${4 - pwField.value.length} more character${4 - pwField.value.length === 1 ? '' : 's'} needed.`; pwHint.style.color = 'var(--coral)'; }
+    else{ pwHint.textContent = 'Looks good.'; pwHint.style.color = 'var(--green-ok)'; }
+  });
   document.getElementById('g-submit').onclick = async ()=>{
     const className = document.getElementById('g-class').value.trim();
     const teacherName = document.getElementById('g-teacher').value.trim();
     const password = document.getElementById('g-password').value;
+    const secQuestion = document.getElementById('g-secq').value.trim();
+    const secAnswer = document.getElementById('g-seca').value.trim();
     const err = document.getElementById('g-error');
-    if(!className || !teacherName || !password){ err.textContent = 'Fill in all fields to continue.'; return; }
+    if(!className || !teacherName || !password || !secQuestion || !secAnswer){ err.textContent = 'Fill in all fields to continue — the security question lets you recover your password later.'; return; }
     if(password.length < 4){ err.textContent = 'Password should be at least 4 characters.'; return; }
     err.textContent = 'Checking class name…';
     try{
@@ -84,8 +99,11 @@ function showCreateGate(fromSwitcher){
       err.textContent = 'Creating class…';
       const code = makeClassCode();
       const passcodeHash = await hashPasscode(password);
+      const securityAnswerHash = await hashPasscode(secAnswer.toLowerCase());
       const ref = await db.collection('classes').add({
-        className, teacherName, code, passcodeHash, createdAt: firebase.firestore.FieldValue.serverTimestamp()
+        className, teacherName, code, passcodeHash,
+        securityQuestion: secQuestion, securityAnswerHash,
+        createdAt: firebase.firestore.FieldValue.serverTimestamp()
       });
       const doc = await ref.get();
       if(fromSwitcher) teardownListeners();
@@ -108,9 +126,13 @@ function showResumeGate(fromSwitcher){
       <div class="field"><label>Class name</label><input id="r-class" placeholder="Period 3 — Biology"></div>
       <div class="field"><label>Teacher password</label><input id="r-password" type="password" placeholder="Your password"></div>
       <button class="btn primary" id="r-submit" style="width:100%;">Log in</button>
-      <div class="gate-error" id="r-error"></div>
-      <p class="meta" style="text-align:center;margin-top:16px;">New here? <a href="#" id="r-switch-create">Create a class instead</a></p>
+      <div class="gate-error" id="r-error" role="alert"></div>
+      <p class="meta" style="text-align:center;margin-top:16px;">
+        <a href="#" id="r-forgot">Forgot your password?</a><br>
+        New here? <a href="#" id="r-switch-create">Create a class instead</a>
+      </p>
     </div>`;
+  document.getElementById('r-forgot').onclick = (e)=>{ e.preventDefault(); showForgotPasswordGate(fromSwitcher); };
   document.getElementById('r-submit').onclick = async ()=>{
     const className = document.getElementById('r-class').value.trim();
     const password = document.getElementById('r-password').value;
@@ -134,6 +156,75 @@ function showResumeGate(fromSwitcher){
     }
   };
   document.getElementById('r-switch-create').onclick = (e)=>{ e.preventDefault(); showCreateGate(fromSwitcher); };
+}
+
+function showForgotPasswordGate(fromSwitcher){
+  document.getElementById('gate').innerHTML = `
+    <div class="gate-card">
+      <div class="mark">CH</div>
+      <h2>Reset your password</h2>
+      <p>Enter your class name — if it has a security question set up, you'll be able to answer it and choose a new password.</p>
+      <div class="field"><label>Class name</label><input id="f-class" placeholder="Period 3 — Biology"></div>
+      <button class="btn primary" id="f-lookup" style="width:100%;">Continue</button>
+      <div class="gate-error" id="f-error" role="alert"></div>
+      <p class="meta" style="text-align:center;margin-top:16px;"><a href="#" id="f-back">‹ Back to log in</a></p>
+    </div>`;
+  document.getElementById('f-back').onclick = (e)=>{ e.preventDefault(); showResumeGate(fromSwitcher); };
+  document.getElementById('f-lookup').onclick = async ()=>{
+    const className = document.getElementById('f-class').value.trim();
+    const err = document.getElementById('f-error');
+    if(!className){ err.textContent = 'Enter your class name to continue.'; return; }
+    err.textContent = 'Looking up class…';
+    try{
+      const snap = await db.collection('classes').where('className','==',className).limit(1).get();
+      if(snap.empty){ err.textContent = 'No class found with that name.'; return; }
+      const doc = snap.docs[0];
+      const info = doc.data();
+      if(!info.securityQuestion || !info.securityAnswerHash){
+        err.textContent = 'This class has no security question set up, so it can\u2019t be recovered this way. Contact your school\u2019s tech support, or ask a colleague with Firebase Console access to reset it manually.';
+        return;
+      }
+      showAnswerSecurityQuestion(doc.id, info, fromSwitcher);
+    }catch(e){
+      err.textContent = 'Could not reach the database. Check firebase-config.js is filled in correctly.';
+    }
+  };
+}
+
+function showAnswerSecurityQuestion(classDocId, info, fromSwitcher){
+  document.getElementById('gate').innerHTML = `
+    <div class="gate-card">
+      <div class="mark">CH</div>
+      <h2>Answer your security question</h2>
+      <p>${escapeHtml(info.securityQuestion)}</p>
+      <div class="field"><label>Answer</label><input id="a-answer" placeholder="Your answer"></div>
+      <div class="field"><label>New password</label><input id="a-password" type="password" placeholder="At least 4 characters" autocomplete="new-password"></div>
+      <button class="btn primary" id="a-submit" style="width:100%;">Reset password</button>
+      <div class="gate-error" id="a-error" role="alert"></div>
+      <p class="meta" style="text-align:center;margin-top:16px;"><a href="#" id="a-back">‹ Back to log in</a></p>
+    </div>`;
+  document.getElementById('a-back').onclick = (e)=>{ e.preventDefault(); showResumeGate(fromSwitcher); };
+  document.getElementById('a-submit').onclick = async ()=>{
+    const answer = document.getElementById('a-answer').value.trim();
+    const newPassword = document.getElementById('a-password').value;
+    const err = document.getElementById('a-error');
+    if(!answer || !newPassword){ err.textContent = 'Fill in both fields to continue.'; return; }
+    if(newPassword.length < 4){ err.textContent = 'Password should be at least 4 characters.'; return; }
+    err.textContent = 'Checking…';
+    try{
+      const answerHash = await hashPasscode(answer.toLowerCase());
+      if(answerHash !== info.securityAnswerHash){ err.textContent = 'That answer doesn\u2019t match — try again.'; return; }
+      const newHash = await hashPasscode(newPassword);
+      await db.collection('classes').doc(classDocId).update({ passcodeHash: newHash });
+      const freshInfo = { ...info, passcodeHash: newHash };
+      if(fromSwitcher) teardownListeners();
+      upsertStoredClass(classDocId, freshInfo.className);
+      setActiveClass(classDocId);
+      startApp(classDocId, freshInfo);
+    }catch(e){
+      err.textContent = 'Could not reach the database. Check firebase-config.js is filled in correctly.';
+    }
+  };
 }
 
 /* Switch between classes already stored on this device, or load one fresh
@@ -307,7 +398,7 @@ function renderClassSwitcher(){
       ${list.map(c=> `<option value="${c.id}" ${c.id===classId?'selected':''}>${escapeHtml(c.className)}</option>`).join('')}
       <option value="__add__">+ Add another class</option>
     </select>
-    <div class="sync-dot"><span class="dot" id="sync-dot"></span><span id="sync-label">Connecting…</span></div>
+    <div class="sync-dot"><span class="dot" id="sync-dot" aria-hidden="true"></span><span id="sync-label" aria-live="polite">Connecting…</span></div>
     <button class="btn small" id="btn-leave-class" style="width:100%;margin-top:10px;">Remove this class</button>
   `;
   document.getElementById('class-switcher').onchange = (e)=>{
@@ -379,6 +470,25 @@ function renderDashboard(){
   html += `</div>`;
   html += `</div>`;
 
+  html += `<div class="card"><h3>Class overview</h3>`;
+  if(!loaded.assignments || !loaded.students){ html += `<p class="meta">Loading…</p>`; }
+  else if(assignments.length === 0){ html += `<p class="meta">Post an assignment to start tracking submission rates.</p>`; }
+  else{
+    const totalStudents = presence.length;
+    const rated = assignments.filter(a=> totalStudents > 0);
+    const avgRate = rated.length
+      ? Math.round(rated.reduce((sum,a)=> sum + Math.min(a.submissionCount / totalStudents, 1), 0) / rated.length * 100)
+      : 0;
+    html += `<p class="meta">Average submission rate across ${assignments.length} assignment${assignments.length===1?'':'s'}${totalStudents ? ` (out of ${totalStudents} joined student${totalStudents===1?'':'s'})` : ''}.</p>
+      <div style="display:flex;align-items:center;gap:10px;margin-top:10px;">
+        <div style="flex:1;height:8px;background:var(--cream);border-radius:4px;overflow:hidden;">
+          <div style="height:100%;width:${avgRate}%;background:var(--amber);"></div>
+        </div>
+        <div style="font-weight:700;font-size:14px;color:var(--forest);min-width:38px;text-align:right;">${totalStudents ? avgRate + '%' : '—'}</div>
+      </div>`;
+  }
+  html += `</div>`;
+
   html += `<div class="card"><h3>Students</h3>`;
   if(!loaded.students){ html += `<p class="meta">Loading…</p>`; }
   else{
@@ -418,15 +528,18 @@ function renderAssignments(){
 
   [...assignments].sort((a,b)=> (a.dueDate||'').localeCompare(b.dueDate||'')).forEach(a=>{
     const status = statusFor(a);
+    const totalStudents = presence.length;
+    const pct = totalStudents ? Math.round(Math.min(a.submissionCount / totalStudents, 1) * 100) : null;
     html += `<div class="card">
       <div class="card-row">
         <div>
           <h3>${escapeHtml(a.title)}</h3>
-          <div class="meta">Due ${a.dueDate} · ${a.submissionCount} submitted</div>
+          <div class="meta">Due ${a.dueDate} · ${a.submissionCount} submitted${pct !== null ? ` (${pct}% of class)` : ''}</div>
           <p class="body-text">${escapeHtml(a.instructions)}</p>
         </div>
         <span class="stamp ${status.cls}">${status.label}</span>
       </div>
+      ${pct !== null ? `<div style="height:6px;background:var(--cream);border-radius:3px;overflow:hidden;margin-top:8px;"><div style="height:100%;width:${pct}%;background:var(--amber);"></div></div>` : ''}
       <div class="form-actions">
         <button class="btn small" data-review="${a.id}">View submissions</button>
         <button class="btn small danger" data-delete="${a.id}">Delete</button>
@@ -781,10 +894,20 @@ async function deleteBook(id){
 function openModal(html, extraClass){
   const bg = document.createElement('div');
   bg.className = 'modal-bg';
-  bg.innerHTML = `<div class="modal${extraClass ? ' ' + extraClass : ''}">${html}</div>`;
-  bg.addEventListener('click', (e)=>{ if(e.target === bg) bg.remove(); });
+  bg.innerHTML = `<div class="modal${extraClass ? ' ' + extraClass : ''}" role="dialog" aria-modal="true">${html}</div>`;
+  bg.addEventListener('click', (e)=>{ if(e.target === bg) closeModal(bg); });
+  const onKey = (e)=>{ if(e.key === 'Escape') closeModal(bg); };
+  document.addEventListener('keydown', onKey);
+  bg._onKey = onKey;
   document.body.appendChild(bg);
+  const firstField = bg.querySelector('input, textarea, select, button');
+  if(firstField) firstField.focus();
   return bg;
+}
+function closeModal(bg){
+  if(!bg) return;
+  if(bg._onKey) document.removeEventListener('keydown', bg._onKey);
+  bg.remove();
 }
 
 function openAssignmentModal(){
@@ -796,7 +919,7 @@ function openAssignmentModal(){
     <div class="form-actions"><button class="btn" id="f-cancel">Cancel</button><button class="btn primary" id="f-save">Post assignment</button></div>
     <div class="gate-error" id="f-error"></div>
   `);
-  modal.querySelector('#f-cancel').onclick = ()=> modal.remove();
+  modal.querySelector('#f-cancel').onclick = ()=> closeModal(modal);
   modal.querySelector('#f-save').onclick = async ()=>{
     const title = modal.querySelector('#f-title').value.trim();
     if(!title) return;
@@ -812,7 +935,7 @@ function openAssignmentModal(){
         dueDate: modal.querySelector('#f-due').value || addDays(3),
         createdAt: firebase.firestore.FieldValue.serverTimestamp()
       });
-      modal.remove();
+      closeModal(modal);
     }catch(e){
       saveBtn.disabled = false;
       saveBtn.textContent = 'Post assignment';
@@ -829,7 +952,7 @@ function openAnnouncementModal(){
     <div class="form-actions"><button class="btn" id="f-cancel">Cancel</button><button class="btn primary" id="f-save">Post</button></div>
     <div class="gate-error" id="f-error"></div>
   `);
-  modal.querySelector('#f-cancel').onclick = ()=> modal.remove();
+  modal.querySelector('#f-cancel').onclick = ()=> closeModal(modal);
   modal.querySelector('#f-save').onclick = async ()=>{
     const title = modal.querySelector('#f-title').value.trim();
     if(!title) return;
@@ -843,7 +966,7 @@ function openAnnouncementModal(){
         title, body: modal.querySelector('#f-body').value.trim(),
         postedAt: firebase.firestore.FieldValue.serverTimestamp()
       });
-      modal.remove();
+      closeModal(modal);
     }catch(e){
       saveBtn.disabled = false;
       saveBtn.textContent = 'Post';
@@ -867,7 +990,7 @@ async function openReviewModal(assignmentId){
     ${subsSnap.empty ? '<p class="meta">No submissions yet.</p>' : `<div style="max-height:320px;overflow:auto;"><table class="sub-table" style="width:100%;font-size:13px;border-collapse:collapse;"><thead><tr><th style="text-align:left;padding:6px;">Student</th><th style="text-align:left;padding:6px;">Response</th><th style="text-align:left;padding:6px;">When</th></tr></thead><tbody>${rows}</tbody></table></div>`}
     <div class="form-actions"><button class="btn" id="f-close">Close</button></div>
   `);
-  modal.querySelector('#f-close').onclick = ()=> modal.remove();
+  modal.querySelector('#f-close').onclick = ()=> closeModal(modal);
 }
 
 function newQuestionId(){ return 'q' + Math.random().toString(36).slice(2, 10); }
@@ -1067,7 +1190,7 @@ function openQuizModal(){
     };
     reader.readAsArrayBuffer(file);
   };
-  modal.querySelector('#f-cancel').onclick = ()=> modal.remove();
+  modal.querySelector('#f-cancel').onclick = ()=> closeModal(modal);
   modal.querySelector('#f-save').onclick = async ()=>{
     syncFromDom();
     const title = modal.querySelector('#qz-title').value.trim();
@@ -1098,7 +1221,7 @@ function openQuizModal(){
         questions: builderQuestions,
         createdAt: firebase.firestore.FieldValue.serverTimestamp()
       });
-      modal.remove();
+      closeModal(modal);
     }catch(e){
       saveBtn.disabled = false;
       saveBtn.textContent = 'Create quiz';
@@ -1140,7 +1263,7 @@ async function openQuizResultsModal(quizId){
   }
 
   const modal = openModal(`<h3>Results — ${escapeHtml(quiz.title)}</h3>${body}<div class="form-actions"><button class="btn" id="f-close">Close</button></div>`);
-  modal.querySelector('#f-close').onclick = ()=> modal.remove();
+  modal.querySelector('#f-close').onclick = ()=> closeModal(modal);
 }
 
 /* Renders one PDF page to a compressed JPEG data-URL via pdf.js */
@@ -1167,7 +1290,7 @@ function openBookUploadModal(){
     <div class="form-actions"><button class="btn" id="f-cancel">Cancel</button><button class="btn primary" id="f-save">Upload</button></div>
     <div class="gate-error" id="f-error"></div>
   `, 'wide');
-  modal.querySelector('#f-cancel').onclick = ()=> modal.remove();
+  modal.querySelector('#f-cancel').onclick = ()=> closeModal(modal);
   modal.querySelector('#f-save').onclick = async ()=>{
     const title = modal.querySelector('#bk-title').value.trim();
     const file = modal.querySelector('#bk-file').files[0];
@@ -1233,7 +1356,7 @@ function openBookUploadModal(){
         stage = 'reading';
         throw new Error('No pages could be rendered from this file.');
       }
-      modal.remove();
+      closeModal(modal);
     }catch(e){
       console.error(e);
       // clean up a partially-created book so it doesn't show up empty
@@ -1288,7 +1411,7 @@ function openBookTocModal(bookId){
   wire();
 
   modal.querySelector('#toc-add').onclick = ()=>{ sync(); toc.push({ title:'', page:1 }); rerender(); };
-  modal.querySelector('#f-cancel').onclick = ()=> modal.remove();
+  modal.querySelector('#f-cancel').onclick = ()=> closeModal(modal);
   modal.querySelector('#f-save').onclick = async ()=>{
     sync();
     const clean = toc.filter(t=> t.title.trim() !== '').sort((a,b)=> a.page - b.page);
@@ -1297,7 +1420,7 @@ function openBookTocModal(bookId){
     saveBtn.textContent = 'Saving…';
     try{
       await db.collection('classes').doc(classId).collection('books').doc(bookId).update({ toc: clean });
-      modal.remove();
+      closeModal(modal);
     }catch(e){
       saveBtn.disabled = false;
       saveBtn.textContent = 'Save';
@@ -1322,7 +1445,7 @@ async function openBookViewer(bookId){
     if(e.key === 'ArrowRight') go(pageNum + 1);
   };
   document.addEventListener('keydown', keyHandler);
-  modal.querySelector('#bv-close').onclick = ()=>{ document.removeEventListener('keydown', keyHandler); modal.remove(); };
+  modal.querySelector('#bv-close').onclick = ()=>{ document.removeEventListener('keydown', keyHandler); closeModal(modal); };
 
   const bookmarksRef = db.collection('classes').doc(classId).collection('books').doc(bookId).collection('bookmarks').doc(ownerId);
   const [pagesSnap, bmDoc] = await Promise.all([

@@ -40,6 +40,37 @@
   function isOnline(p){ return (Date.now() - tsVal(p.lastSeen)) < ONLINE_WINDOW_MS; }
   function callsCol(){ return db.collection('classes').doc(ctx.classId).collection('calls'); }
 
+  /* --------------------------- ringtone --------------------------- */
+  let ringAudioCtx = null;
+  let ringInterval = null;
+  let ringOscillators = [];
+  function playRingtoneChirp(){
+    try{
+      ringAudioCtx = ringAudioCtx || new (window.AudioContext || window.webkitAudioContext)();
+      const now = ringAudioCtx.currentTime;
+      [0, 0.18].forEach(offset=>{
+        const osc = ringAudioCtx.createOscillator();
+        const gain = ringAudioCtx.createGain();
+        osc.frequency.value = 880;
+        gain.gain.setValueAtTime(0.0001, now + offset);
+        gain.gain.exponentialRampToValueAtTime(0.18, now + offset + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + offset + 0.15);
+        osc.connect(gain); gain.connect(ringAudioCtx.destination);
+        osc.start(now + offset); osc.stop(now + offset + 0.16);
+      });
+    }catch(e){ /* audio not available — silently skip the tone */ }
+  }
+  function startRinging(){
+    stopRinging();
+    playRingtoneChirp();
+    ringInterval = setInterval(playRingtoneChirp, 1600);
+    if(navigator.vibrate) navigator.vibrate([300, 200, 300, 200, 300]);
+  }
+  function stopRinging(){
+    if(ringInterval){ clearInterval(ringInterval); ringInterval = null; }
+    if(navigator.vibrate) navigator.vibrate(0);
+  }
+
   /* --------------------------- DOM shell --------------------------- */
   function ensureRoot(){
     if(root) return;
@@ -48,9 +79,9 @@
     document.body.appendChild(root);
 
     fabBtn = el(`
-      <button id="cc-fab" class="cc-fab" title="Start a call">
-        <span class="cc-fab-icon">\u{1F4DE}</span>
-        <span id="cc-fab-badge" class="cc-fab-badge hidden">0</span>
+      <button id="cc-fab" class="cc-fab" title="Start a call" aria-label="Start a call">
+        <span class="cc-fab-icon" aria-hidden="true">\u{1F4DE}</span>
+        <span id="cc-fab-badge" class="cc-fab-badge hidden" aria-hidden="true">0</span>
       </button>`);
     fabBtn.addEventListener('click', togglePanel);
     root.appendChild(fabBtn);
@@ -67,10 +98,10 @@
         <video id="cc-local-video" class="cc-local-video" autoplay playsinline muted></video>
         <div class="cc-bubble-status" id="cc-bubble-status"></div>
         <div class="cc-bubble-controls">
-          <button class="cc-ctrl" id="cc-toggle-mic" title="Mute / unmute">\u{1F3A4}</button>
-          <button class="cc-ctrl" id="cc-toggle-cam" title="Camera on / off">\u{1F4F9}</button>
-          <button class="cc-ctrl cc-ctrl-min" id="cc-minimize" title="Minimize">\u2014</button>
-          <button class="cc-ctrl cc-ctrl-end" id="cc-hangup" title="Hang up">\u2715</button>
+          <button class="cc-ctrl" id="cc-toggle-mic" title="Mute / unmute" aria-label="Mute or unmute microphone">\u{1F3A4}</button>
+          <button class="cc-ctrl" id="cc-toggle-cam" title="Camera on / off" aria-label="Turn camera on or off">\u{1F4F9}</button>
+          <button class="cc-ctrl cc-ctrl-min" id="cc-minimize" title="Minimize" aria-label="Minimize call">\u2014</button>
+          <button class="cc-ctrl cc-ctrl-end" id="cc-hangup" title="Hang up" aria-label="Hang up call">\u2715</button>
         </div>
       </div>`);
     root.appendChild(bubbleEl);
@@ -145,8 +176,12 @@
     unsubIncoming = callsCol().where('calleeId','==', ctx.myId)
       .onSnapshot(snap=>{
         snap.docChanges().forEach(change=>{
-          if(change.type !== 'added' && change.type !== 'modified') return;
           const data = change.doc.data();
+          if(change.type === 'removed' || (data && ['ended','missed','declined'].includes(data.status))){
+            if(!incomingEl.classList.contains('hidden')){ stopRinging(); incomingEl.classList.add('hidden'); }
+            return;
+          }
+          if(change.type !== 'added' && change.type !== 'modified') return;
           if(data.status !== 'ringing') return;
           if(inCallWith || callDocRef){ // already busy — auto-decline
             callsCol().doc(change.doc.id).update({ status: 'declined' }).catch(()=>{});
@@ -158,20 +193,23 @@
   }
 
   function showIncoming(callId, data){
+    startRinging();
     incomingEl.innerHTML = `
       <div class="cc-incoming-card">
         <div class="cc-incoming-title">${esc(data.callerName || 'Someone')} is calling\u2026</div>
         <div class="cc-incoming-actions">
-          <button class="btn primary" id="cc-accept">Accept</button>
-          <button class="btn danger" id="cc-decline">Decline</button>
+          <button class="btn primary" id="cc-accept" aria-label="Accept call from ${esc(data.callerName || 'caller')}">Accept</button>
+          <button class="btn danger" id="cc-decline" aria-label="Decline call from ${esc(data.callerName || 'caller')}">Decline</button>
         </div>
       </div>`;
     incomingEl.classList.remove('hidden');
     incomingEl.querySelector('#cc-decline').onclick = ()=>{
+      stopRinging();
       incomingEl.classList.add('hidden');
       callsCol().doc(callId).update({ status: 'declined' }).catch(()=>{});
     };
     incomingEl.querySelector('#cc-accept').onclick = async ()=>{
+      stopRinging();
       incomingEl.classList.add('hidden');
       await acceptCall(callId, data);
     };
@@ -350,6 +388,7 @@
   }
 
   function teardown(){
+    stopRinging();
     if(unsubPresence){ unsubPresence(); unsubPresence = null; }
     if(unsubIncoming){ unsubIncoming(); unsubIncoming = null; }
     if(callDocRef || pc) endCall('ended');

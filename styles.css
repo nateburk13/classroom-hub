@@ -298,3 +298,16 @@ button.btn.small{padding:6px 10px;font-size:12px;}
   .cc-bubble{width:min(180px,52vw);right:12px;bottom:calc(84px + env(safe-area-inset-bottom,0px));}
   .cc-panel-call{width:40px;height:40px;}
 }
+
+/* ============================= ACCESSIBILITY ============================= */
+a, button, input, textarea, select, [tabindex]{
+  outline-offset:2px;
+}
+a:focus-visible, button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, .nav-btn:focus-visible, .landing-link:focus-visible{
+  outline:2px solid var(--amber-dark);
+  outline-offset:2px;
+}
+.cc-fab:focus-visible, .cc-ctrl:focus-visible, .cc-panel-call:focus-visible{
+  outline:3px solid #fff;
+  box-shadow:0 0 0 5px var(--amber-dark);
+}

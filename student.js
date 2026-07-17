@@ -411,7 +411,7 @@ function renderClassSwitcher(){
       ${list.map(c=> `<option value="${c.id}" ${c.id===classId?'selected':''}>${escapeHtml(c.className)}</option>`).join('')}
       <option value="__add__">+ Join another class</option>
     </select>
-    <div class="sync-dot"><span class="dot" id="sync-dot"></span><span id="sync-label">Connecting…</span></div>
+    <div class="sync-dot"><span class="dot" id="sync-dot" aria-hidden="true"></span><span id="sync-label" aria-live="polite">Connecting…</span></div>
     <button class="btn small" id="btn-leave-class" style="width:100%;margin-top:10px;">Leave this class</button>
   `;
   document.getElementById('class-switcher').onchange = (e)=>{
@@ -703,22 +703,47 @@ function statusFor(a){
 function openModal(html, extraClass){
   const bg = document.createElement('div');
   bg.className = 'modal-bg';
-  bg.innerHTML = `<div class="modal${extraClass ? ' ' + extraClass : ''}">${html}</div>`;
-  bg.addEventListener('click', (e)=>{ if(e.target === bg) bg.remove(); });
+  bg.innerHTML = `<div class="modal${extraClass ? ' ' + extraClass : ''}" role="dialog" aria-modal="true">${html}</div>`;
+  bg.addEventListener('click', (e)=>{ if(e.target === bg) closeModal(bg); });
+  const onKey = (e)=>{ if(e.key === 'Escape') closeModal(bg); };
+  document.addEventListener('keydown', onKey);
+  bg._onKey = onKey;
   document.body.appendChild(bg);
+  const firstField = bg.querySelector('input, textarea, select, button');
+  if(firstField) firstField.focus();
   return bg;
 }
+function closeModal(bg){
+  if(!bg) return;
+  if(bg._onKey) document.removeEventListener('keydown', bg._onKey);
+  bg.remove();
+}
+
+function draftKey(assignmentId){ return `classroom-hub-draft-${classId}-${assignmentId}`; }
 
 function openSubmitModal(assignmentId){
   const a = assignments.find(x=>x.id===assignmentId);
   const existing = mySubmissions[assignmentId];
+  const draft = !existing ? localStorage.getItem(draftKey(assignmentId)) : null;
   const modal = openModal(`
     <h3>Submit: ${escapeHtml(a.title)}</h3>
-    <div class="field"><label>Your response</label><textarea id="f-text" rows="4" placeholder="Paste your work or notes here">${existing ? escapeHtml(existing.text) : ''}</textarea></div>
+    <div class="field"><label>Your response</label><textarea id="f-text" rows="4" placeholder="Paste your work or notes here">${existing ? escapeHtml(existing.text) : escapeHtml(draft || '')}</textarea></div>
+    <div class="meta" id="f-draft-status" style="min-height:14px;margin:-4px 0 4px;">${draft && !existing ? 'Draft restored from your last visit.' : ''}</div>
     <div class="form-actions"><button class="btn" id="f-cancel">Cancel</button><button class="btn primary" id="f-save">${existing ? 'Update' : 'Submit'}</button></div>
     <div class="gate-error" id="f-error"></div>
   `);
-  modal.querySelector('#f-cancel').onclick = ()=> modal.remove();
+  const textarea = modal.querySelector('#f-text');
+  const draftStatus = modal.querySelector('#f-draft-status');
+  let draftTimer = null;
+  textarea.addEventListener('input', ()=>{
+    clearTimeout(draftTimer);
+    draftTimer = setTimeout(()=>{
+      const val = textarea.value;
+      if(val.trim()){ localStorage.setItem(draftKey(assignmentId), val); draftStatus.textContent = 'Draft saved on this device.'; }
+      else{ localStorage.removeItem(draftKey(assignmentId)); draftStatus.textContent = ''; }
+    }, 500);
+  });
+  modal.querySelector('#f-cancel').onclick = ()=> closeModal(modal);
   modal.querySelector('#f-save').onclick = async ()=>{
     const text = modal.querySelector('#f-text').value.trim();
     const saveBtn = modal.querySelector('#f-save');
@@ -731,7 +756,8 @@ function openSubmitModal(assignmentId){
         .collection('submissions').doc(studentDocId()).set({
           studentName, text, submittedAt: firebase.firestore.FieldValue.serverTimestamp()
         });
-      modal.remove();
+      localStorage.removeItem(draftKey(assignmentId));
+      closeModal(modal);
     }catch(e){
       saveBtn.disabled = false;
       saveBtn.textContent = existing ? 'Update' : 'Submit';
@@ -756,7 +782,7 @@ async function openBookViewer(bookId){
     if(e.key === 'ArrowRight') go(pageNum + 1);
   };
   document.addEventListener('keydown', keyHandler);
-  modal.querySelector('#bv-close').onclick = ()=>{ document.removeEventListener('keydown', keyHandler); modal.remove(); };
+  modal.querySelector('#bv-close').onclick = ()=>{ document.removeEventListener('keydown', keyHandler); closeModal(modal); };
 
   const bookmarksRef = db.collection('classes').doc(classId).collection('books').doc(bookId).collection('bookmarks').doc(ownerId);
   const [pagesSnap, bmDoc] = await Promise.all([
