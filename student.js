@@ -110,6 +110,10 @@ function teardownListeners(){
   if(unsubBooks) unsubBooks();
   unsubAssignments = unsubAnnouncements = unsubQuizzes = unsubBooks = null;
   stopPresence();
+  ClassroomCall.teardown();
+  if(unsubIncomingCall){ unsubIncomingCall(); unsubIncomingCall = null; }
+  cleanupCallLocal();
+  hideIncomingCallBanner();
   assignments = []; announcements = []; quizzes = []; books = [];
   mySubmissions = {}; myQuizResponses = {}; selectedMcAnswer = {};
   loaded = { assignments: false, announcements: false, quizzes: false, books: false };
@@ -121,7 +125,7 @@ function teardownListeners(){
 function touchPresence(){
   if(!classId) return;
   db.collection('classes').doc(classId).collection('presence').doc(studentDocId())
-    .set({ studentName, lastSeen: firebase.firestore.FieldValue.serverTimestamp() }, { merge: true })
+    .set({ studentName, role: 'student', lastSeen: firebase.firestore.FieldValue.serverTimestamp() }, { merge: true })
     .catch(()=>{ /* best-effort — a missed heartbeat just means we look offline sooner */ });
 }
 function startPresence(){
@@ -136,6 +140,167 @@ function stopPresence(){
 }
 function onVisibilityChangeForPresence(){
   if(!document.hidden) touchPresence(); // coming back to the tab counts as "here now"
+}
+
+/* --------------------------- 1b. VIDEO CALLS --------------------------- */
+function listenForIncomingCalls(){
+  unsubIncomingCall = db.collection('classes').doc(classId).collection('calls').doc(studentDocId())
+    .onSnapshot((snap)=>{
+      const data = snap.data();
+      if(!data) return;
+      if(data.status === 'ringing' && !pc){ showIncomingCallBanner(data); }
+      else{ hideIncomingCallBanner(); }
+      if((data.status === 'ended' || data.status === 'declined') && pc){ cleanupCallLocal(); }
+    });
+}
+
+function showIncomingCallBanner(data){
+  if(document.getElementById('incoming-call-banner')) return;
+  const bar = document.createElement('div');
+  bar.id = 'incoming-call-banner';
+  bar.className = 'incoming-call-banner';
+  bar.innerHTML = `<span>${escapeHtml(data.fromName || 'Your teacher')} is calling…</span>
+    <button class="btn small primary" id="call-accept">Accept</button>
+    <button class="btn small danger" id="call-decline">Decline</button>`;
+  document.body.appendChild(bar);
+  document.getElementById('call-accept').onclick = acceptCall;
+  document.getElementById('call-decline').onclick = declineCall;
+}
+function hideIncomingCallBanner(){ const b = document.getElementById('incoming-call-banner'); if(b) b.remove(); }
+
+async function acceptCall(){
+  hideIncomingCallBanner();
+  const callId = studentDocId();
+  const callRef = db.collection('classes').doc(classId).collection('calls').doc(callId);
+  const snap = await callRef.get();
+  const data = snap.data();
+  if(!data || data.status !== 'ringing') return;
+
+  try{
+    localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+  }catch(e){ alert('Could not access your camera/microphone. Check browser permissions and try again.'); return; }
+
+  activeCallId = callId;
+  pc = new RTCPeerConnection(RTC_CONFIG);
+  localStream.getTracks().forEach(t=> pc.addTrack(t, localStream));
+  showCallWidget(data.fromName || 'your teacher', false);
+
+  const remoteStream = new MediaStream();
+  const remoteVideo = document.getElementById('call-remote-video');
+  if(remoteVideo) remoteVideo.srcObject = remoteStream;
+  pc.ontrack = (e)=>{ e.streams[0].getTracks().forEach(t=> remoteStream.addTrack(t)); };
+  pc.onconnectionstatechange = ()=>{
+    if(pc && pc.connectionState === 'connected') setCallStatus('Connected');
+    if(pc && (pc.connectionState === 'failed' || pc.connectionState === 'disconnected')) setCallStatus('Connection lost…');
+  };
+
+  const offerCandidates = callRef.collection('offerCandidates');
+  const answerCandidates = callRef.collection('answerCandidates');
+  pc.onicecandidate = (e)=>{ if(e.candidate) answerCandidates.add(e.candidate.toJSON()); };
+
+  await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
+  const answerDesc = await pc.createAnswer();
+  await pc.setLocalDescription(answerDesc);
+  await callRef.update({ answer: { sdp: answerDesc.sdp, type: answerDesc.type }, status: 'active' });
+
+  unsubCall = callRef.onSnapshot((snap)=>{
+    const d = snap.data();
+    if(!d || d.status === 'ended'){ cleanupCallLocal(); }
+  });
+  unsubRemoteCandidates = offerCandidates.onSnapshot((snap)=>{
+    snap.docChanges().forEach(change=>{
+      if(change.type === 'added' && pc) pc.addIceCandidate(new RTCIceCandidate(change.doc.data())).catch(()=>{});
+    });
+  });
+}
+
+function declineCall(){
+  hideIncomingCallBanner();
+  db.collection('classes').doc(classId).collection('calls').doc(studentDocId())
+    .update({ status: 'declined' }).catch(()=>{});
+}
+
+function cleanupCallLocal(){
+  if(unsubCall){ unsubCall(); unsubCall = null; }
+  if(unsubRemoteCandidates){ unsubRemoteCandidates(); unsubRemoteCandidates = null; }
+  if(pc){ pc.close(); pc = null; }
+  if(localStream){ localStream.getTracks().forEach(t=> t.stop()); localStream = null; }
+  hideCallWidget();
+  activeCallId = null;
+}
+
+async function endCall(){
+  const wasId = activeCallId;
+  const wasClassId = classId;
+  cleanupCallLocal();
+  if(wasId){
+    try{ await db.collection('classes').doc(wasClassId).collection('calls').doc(wasId).update({ status: 'ended' }); }catch(e){}
+  }
+}
+
+function showCallWidget(peerName, isCaller){
+  let widget = document.getElementById('call-widget');
+  if(!widget){
+    widget = document.createElement('div');
+    widget.id = 'call-widget';
+    widget.className = 'call-widget';
+    widget.innerHTML = `
+      <div class="call-widget-head" id="call-widget-head">
+        <span id="call-widget-title"></span>
+        <button class="call-icon-btn" id="call-minimize" title="Minimize">–</button>
+      </div>
+      <div class="call-widget-body">
+        <video id="call-remote-video" autoplay playsinline></video>
+        <video id="call-local-video" autoplay playsinline muted></video>
+        <div class="call-status" id="call-status"></div>
+        <div class="call-controls">
+          <button class="btn small" id="call-toggle-mic">Mute</button>
+          <button class="btn small" id="call-toggle-cam">Camera off</button>
+          <button class="btn small danger" id="call-end">End call</button>
+        </div>
+      </div>`;
+    document.body.appendChild(widget);
+    makeCallWidgetDraggable(widget, document.getElementById('call-widget-head'));
+    document.getElementById('call-end').onclick = ()=> endCall();
+    document.getElementById('call-toggle-mic').onclick = toggleCallMic;
+    document.getElementById('call-toggle-cam').onclick = toggleCallCam;
+    document.getElementById('call-minimize').onclick = ()=> widget.classList.toggle('minimized');
+  }
+  document.getElementById('call-widget-title').textContent = `Call with ${peerName}`;
+  setCallStatus(isCaller ? 'Calling…' : 'Connecting…');
+  widget.classList.remove('minimized');
+  const localVideo = document.getElementById('call-local-video');
+  if(localVideo) localVideo.srcObject = localStream;
+}
+function hideCallWidget(){ const w = document.getElementById('call-widget'); if(w) w.remove(); }
+function setCallStatus(text){ const el = document.getElementById('call-status'); if(el) el.textContent = text; }
+function toggleCallMic(){
+  if(!localStream) return;
+  const track = localStream.getAudioTracks()[0]; if(!track) return;
+  track.enabled = !track.enabled;
+  document.getElementById('call-toggle-mic').textContent = track.enabled ? 'Mute' : 'Unmute';
+}
+function toggleCallCam(){
+  if(!localStream) return;
+  const track = localStream.getVideoTracks()[0]; if(!track) return;
+  track.enabled = !track.enabled;
+  document.getElementById('call-toggle-cam').textContent = track.enabled ? 'Camera off' : 'Camera on';
+}
+function makeCallWidgetDraggable(el, handle){
+  let offX = 0, offY = 0, dragging = false;
+  handle.addEventListener('pointerdown', (e)=>{
+    dragging = true;
+    const rect = el.getBoundingClientRect();
+    offX = e.clientX - rect.left; offY = e.clientY - rect.top;
+    el.style.right = 'auto'; el.style.bottom = 'auto';
+    handle.setPointerCapture(e.pointerId);
+  });
+  handle.addEventListener('pointermove', (e)=>{
+    if(!dragging) return;
+    el.style.left = Math.min(window.innerWidth - 60, Math.max(0, e.clientX - offX)) + 'px';
+    el.style.top = Math.min(window.innerHeight - 40, Math.max(0, e.clientY - offY)) + 'px';
+  });
+  handle.addEventListener('pointerup', ()=>{ dragging = false; });
 }
 
 /* --------------------------- 2. STATE --------------------------- */
@@ -155,6 +320,17 @@ let unsubAssignments = null, unsubAnnouncements = null, unsubQuizzes = null, uns
 let presenceInterval = null;
 const PRESENCE_HEARTBEAT_MS = 25000; // how often we tell the teacher we're still here
 
+/* ---- Live video/audio calls (WebRTC, signaled through Firestore) ---- */
+const RTC_CONFIG = { iceServers: [
+  { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }
+] };
+let pc = null;
+let localStream = null;
+let activeCallId = null;
+let unsubCall = null;
+let unsubRemoteCandidates = null;
+let unsubIncomingCall = null;
+
 function studentDocId(){
   // stable, readable doc id derived from the student's name
   return studentName.trim().toLowerCase().replace(/[^a-z0-9]+/g,'-');
@@ -170,6 +346,8 @@ function startApp(id, info, name){
   document.getElementById('who-avatar').textContent = initials(studentName);
   renderClassSwitcher();
   startPresence();
+  ClassroomCall.init({ classId, myId: studentDocId(), myName: studentName, myRole: 'student' });
+  listenForIncomingCalls();
 
   unsubAssignments = db.collection('classes').doc(classId).collection('assignments')
     .onSnapshot(async (snap)=>{
