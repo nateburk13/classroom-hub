@@ -578,12 +578,37 @@ function renderQuizzes(){
   }
   let html = '';
   quizzes.forEach(quiz=>{
+    const resp = myQuizResponses[quiz.id] || { answers: {} };
+    const allDone = quiz.questions.every(q=>{
+      const ans = (resp.answers && resp.answers[q.id]) || { attempts: [], solved: false };
+      return ans.solved || ans.attempts.length >= q.maxAttempts;
+    });
     html += `<div class="card"><h3>${escapeHtml(quiz.title)}</h3>`;
     quiz.questions.forEach((q, i)=>{ html += renderQuizQuestion(quiz.id, q, i); });
+    if(allDone && quiz.allowRetake){
+      html += `<div class="form-actions"><button class="btn primary small" data-retake-quiz="${quiz.id}">Retake quiz</button></div>`;
+    }
     html += `</div>`;
   });
   viewRoot.innerHTML = html;
   wireQuizHandlers();
+  viewRoot.querySelectorAll('[data-retake-quiz]').forEach(btn=> btn.onclick = ()=> retakeQuiz(btn.dataset.retakeQuiz));
+}
+
+async function retakeQuiz(quizId){
+  if(!confirm('Start this quiz over? Your previous answers for it will be cleared.')) return;
+  const prev = myQuizResponses[quizId];
+  const fresh = { studentName, answers: {} };
+  myQuizResponses[quizId] = fresh;
+  render();
+  try{
+    await db.collection('classes').doc(classId).collection('quizzes').doc(quizId)
+      .collection('responses').doc(studentDocId()).set(fresh);
+  }catch(e){
+    myQuizResponses[quizId] = prev;
+    render();
+    alert("Couldn't reset this quiz — check your connection and try again.");
+  }
 }
 
 function renderQuizQuestion(quizId, q, index){
@@ -882,6 +907,33 @@ async function openBookViewer(bookId){
     body.querySelector('#bv-zoom-reset').onclick = ()=> setZoom(1);
     body.querySelectorAll('[data-goto]').forEach(el=> el.onclick = ()=> go(+el.dataset.goto));
     body.querySelectorAll('[data-edit-bm]').forEach(el=> el.onclick = ()=> openBookmarkEditor(+el.dataset.editBm));
+    wireSwipe(body.querySelector('.book-page-wrap'));
+  }
+
+  // Touch swipe left/right to flip pages (mobile/trackpad-friendly).
+  // Horizontal swipes past a small threshold change the page; near-horizontal
+  // swipes are also treated as a "not much vertical movement" scroll guard so
+  // ordinary vertical scrolling isn't hijacked.
+  function wireSwipe(el){
+    if(!el) return;
+    let startX = 0, startY = 0, tracking = false;
+    el.addEventListener('touchstart', (e)=>{
+      if(e.touches.length !== 1) return;
+      startX = e.touches[0].clientX;
+      startY = e.touches[0].clientY;
+      tracking = true;
+    }, { passive: true });
+    el.addEventListener('touchend', (e)=>{
+      if(!tracking) return;
+      tracking = false;
+      const touch = e.changedTouches[0];
+      const dx = touch.clientX - startX;
+      const dy = touch.clientY - startY;
+      const SWIPE_THRESHOLD = 50;
+      if(Math.abs(dx) > SWIPE_THRESHOLD && Math.abs(dx) > Math.abs(dy)){
+        if(dx < 0) go(pageNum + 1); else go(pageNum - 1);
+      }
+    }, { passive: true });
   }
 
   renderBody();

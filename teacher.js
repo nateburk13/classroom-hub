@@ -606,6 +606,9 @@ function renderQuizzes(){
           <div class="meta">${q.questions.length} question${q.questions.length===1?'':'s'} · ${q.responseCount} student${q.responseCount===1?'':'s'} responded</div>
         </div>
       </div>
+      <label class="meta" style="display:flex;align-items:center;gap:6px;margin-top:8px;">
+        <input type="checkbox" data-toggle-retake="${q.id}" style="width:auto;" ${q.allowRetake ? 'checked' : ''}> Allow students to retake this quiz
+      </label>
       <div class="form-actions">
         <button class="btn small" data-quiz-results="${q.id}">View results</button>
         <button class="btn small danger" data-delete-quiz="${q.id}">Delete</button>
@@ -617,6 +620,10 @@ function renderQuizzes(){
   document.getElementById('btn-new-quiz').onclick = openQuizModal;
   viewRoot.querySelectorAll('[data-quiz-results]').forEach(b=> b.onclick = ()=> openQuizResultsModal(b.dataset.quizResults));
   viewRoot.querySelectorAll('[data-delete-quiz]').forEach(b=> b.onclick = ()=> deleteQuiz(b.dataset.deleteQuiz));
+  viewRoot.querySelectorAll('[data-toggle-retake]').forEach(cb=> cb.onchange = ()=>{
+    db.collection('classes').doc(classId).collection('quizzes').doc(cb.dataset.toggleRetake)
+      .set({ allowRetake: cb.checked }, { merge: true }).catch(()=> alert("Couldn't update this quiz — check your connection and try again."));
+  });
 }
 
 function renderBooks(){
@@ -1087,6 +1094,9 @@ function openQuizModal(){
     </div>
     <div id="qz-questions"></div>
     <button type="button" class="btn small" id="qz-add-question">Add question</button>
+    <div class="field" style="margin-top:14px;"><label style="display:flex;align-items:center;gap:8px;font-weight:600;"><input type="checkbox" id="qz-allow-retake" style="width:auto;"> Allow students to retake the whole quiz</label>
+      <div class="meta" style="margin-top:4px;">If checked, once a student finishes (or runs out of attempts), they get a "Retake quiz" button that clears their answers and lets them start over.</div>
+    </div>
     <div class="form-actions"><button class="btn" id="f-cancel">Cancel</button><button class="btn primary" id="f-save">Create quiz</button></div>
   `, 'wide');
 
@@ -1219,6 +1229,7 @@ function openQuizModal(){
       await db.collection('classes').doc(classId).collection('quizzes').add({
         title,
         questions: builderQuestions,
+        allowRetake: modal.querySelector('#qz-allow-retake').checked,
         createdAt: firebase.firestore.FieldValue.serverTimestamp()
       });
       closeModal(modal);
@@ -1545,6 +1556,30 @@ async function openBookViewer(bookId){
     body.querySelector('#bv-zoom-reset').onclick = ()=> setZoom(1);
     body.querySelectorAll('[data-goto]').forEach(el=> el.onclick = ()=> go(+el.dataset.goto));
     body.querySelectorAll('[data-edit-bm]').forEach(el=> el.onclick = ()=> openBookmarkEditor(+el.dataset.editBm));
+    wireSwipe(body.querySelector('.book-page-wrap'));
+  }
+
+  // Touch swipe left/right to flip pages (mobile/trackpad-friendly).
+  function wireSwipe(el){
+    if(!el) return;
+    let startX = 0, startY = 0, tracking = false;
+    el.addEventListener('touchstart', (e)=>{
+      if(e.touches.length !== 1) return;
+      startX = e.touches[0].clientX;
+      startY = e.touches[0].clientY;
+      tracking = true;
+    }, { passive: true });
+    el.addEventListener('touchend', (e)=>{
+      if(!tracking) return;
+      tracking = false;
+      const touch = e.changedTouches[0];
+      const dx = touch.clientX - startX;
+      const dy = touch.clientY - startY;
+      const SWIPE_THRESHOLD = 50;
+      if(Math.abs(dx) > SWIPE_THRESHOLD && Math.abs(dx) > Math.abs(dy)){
+        if(dx < 0) go(pageNum + 1); else go(pageNum - 1);
+      }
+    }, { passive: true });
   }
 
   renderBody();
