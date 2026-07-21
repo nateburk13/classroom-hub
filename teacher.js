@@ -256,7 +256,6 @@ function teardownListeners(){
   unsubAssignments = unsubAnnouncements = unsubQuizzes = unsubBooks = unsubPresence = null;
   stopTeacherPresence();
   ClassroomCall.teardown();
-  cleanupCallLocal();
   assignments = []; announcements = []; quizzes = []; books = []; presence = [];
   loaded = { assignments: false, announcements: false, quizzes: false, books: false, students: false };
 }
@@ -280,20 +279,9 @@ const PRESENCE_ONLINE_MS = 60000; // no heartbeat within this window = shown off
 const TEACHER_PRESENCE_ID = '__teacher__';
 let teacherPresenceInterval = null;
 const PRESENCE_HEARTBEAT_MS = 25000;
-
-/* ---- Live video/audio calls (WebRTC, signaled through Firestore) ----
-   STUN-only config below works for most home/mobile networks. Some school
-   networks block peer-to-peer traffic entirely; if calls consistently fail
-   to connect (stuck on "Calling…"), you'd need to add a TURN server here —
-   ask me and I can help wire one in. */
-const RTC_CONFIG = { iceServers: [
-  { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }
-] };
-let pc = null;
-let localStream = null;
-let activeCallId = null;   // the studentId this call is with
-let unsubCall = null;
-let unsubRemoteCandidates = null;
+/* Live video/audio calls are handled entirely by the shared call.js module
+   (window.ClassroomCall) — see ClassroomCall.init() below and callPerson()
+   usage in renderStudents(). No teacher-specific call state lives here. */
 
 function startApp(id, info){
   classId = id;
@@ -376,7 +364,10 @@ function touchTeacherPresence(){
   if(!classId) return;
   db.collection('classes').doc(classId).collection('presence').doc(TEACHER_PRESENCE_ID)
     .set({ name: classInfo.teacherName, role: 'teacher', lastSeen: firebase.firestore.FieldValue.serverTimestamp() }, { merge: true })
-    .catch(()=>{});
+    .catch((e)=>{
+      const label = document.getElementById('sync-label');
+      if(label) label.textContent = `Presence blocked (${(e && e.code) ? e.code : 'unknown error'})`;
+    });
 }
 function startTeacherPresence(){
   stopTeacherPresence();
@@ -691,7 +682,6 @@ function renderStudents(){
   let html = `<p class="meta" style="margin-bottom:14px;">${onlineCount} of ${sorted.length} student${sorted.length===1?'':'s'} online now.</p>`;
   sorted.forEach(p=>{
     const online = isOnline(p);
-    const inThisCall = activeCallId === p.id;
     html += `<div class="card">
       <div class="card-row" style="align-items:center;">
         <div style="display:flex;align-items:center;gap:10px;">
@@ -701,154 +691,18 @@ function renderStudents(){
             <div class="meta">${online ? 'Online now' : `Last active ${timeAgo(tsVal(p.lastSeen))}`}</div>
           </div>
         </div>
-        <button class="btn small ${inThisCall ? 'danger' : 'primary'}" data-call="${p.id}" data-name="${escapeHtml(p.studentName || 'this student')}" ${activeCallId && !inThisCall ? 'disabled' : ''}>
-          ${inThisCall ? 'End call' : (online ? 'Video call' : 'Call (offline)')}
+        <button class="btn small primary" data-call="${p.id}" data-name="${escapeHtml(p.studentName || 'this student')}" ${online ? '' : 'disabled'}>
+          Video call
         </button>
       </div>
     </div>`;
   });
   viewRoot.innerHTML = html;
   viewRoot.querySelectorAll('[data-call]').forEach(b=> b.onclick = ()=>{
-    if(activeCallId === b.dataset.call){ endCall(); return; }
-    startCall(b.dataset.call, b.dataset.name);
+    ClassroomCall.callPerson(b.dataset.call, b.dataset.name);
   });
 }
 
-/* --------------------------- 3b. VIDEO CALLS --------------------------- */
-async function startCall(studentId, studentName){
-  if(pc){ alert('You are already in a call — end it before starting another.'); return; }
-  try{
-    localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-  }catch(e){ alert('Could not access your camera/microphone. Check browser permissions and try again.'); return; }
-
-  activeCallId = studentId;
-  render(); // reflect "End call" button state immediately
-  const callRef = db.collection('classes').doc(classId).collection('calls').doc(studentId);
-
-  pc = new RTCPeerConnection(RTC_CONFIG);
-  localStream.getTracks().forEach(t=> pc.addTrack(t, localStream));
-  showCallWidget(studentName, true);
-
-  const remoteStream = new MediaStream();
-  const remoteVideo = document.getElementById('call-remote-video');
-  if(remoteVideo) remoteVideo.srcObject = remoteStream;
-  pc.ontrack = (e)=>{ e.streams[0].getTracks().forEach(t=> remoteStream.addTrack(t)); };
-  pc.onconnectionstatechange = ()=>{
-    if(pc && pc.connectionState === 'connected') setCallStatus('Connected');
-    if(pc && (pc.connectionState === 'failed' || pc.connectionState === 'disconnected')) setCallStatus('Connection lost…');
-  };
-
-  const offerCandidates = callRef.collection('offerCandidates');
-  const answerCandidates = callRef.collection('answerCandidates');
-  pc.onicecandidate = (e)=>{ if(e.candidate) offerCandidates.add(e.candidate.toJSON()); };
-
-  const offerDesc = await pc.createOffer();
-  await pc.setLocalDescription(offerDesc);
-  await callRef.set({
-    from: 'teacher', fromName: classInfo.teacherName, toId: studentId, toName: studentName,
-    offer: { sdp: offerDesc.sdp, type: offerDesc.type }, status: 'ringing',
-    createdAt: firebase.firestore.FieldValue.serverTimestamp()
-  });
-
-  unsubCall = callRef.onSnapshot(async (snap)=>{
-    const data = snap.data();
-    if(!data){ endCall(); return; }
-    if(data.status === 'declined'){ setCallStatus('Call declined.'); setTimeout(endCall, 1500); return; }
-    if(data.status === 'ended'){ endCall(); return; }
-    if(data.answer && pc && !pc.currentRemoteDescription){
-      await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
-    }
-  });
-  unsubRemoteCandidates = answerCandidates.onSnapshot((snap)=>{
-    snap.docChanges().forEach(change=>{
-      if(change.type === 'added' && pc) pc.addIceCandidate(new RTCIceCandidate(change.doc.data())).catch(()=>{});
-    });
-  });
-}
-
-function cleanupCallLocal(){
-  if(unsubCall){ unsubCall(); unsubCall = null; }
-  if(unsubRemoteCandidates){ unsubRemoteCandidates(); unsubRemoteCandidates = null; }
-  if(pc){ pc.close(); pc = null; }
-  if(localStream){ localStream.getTracks().forEach(t=> t.stop()); localStream = null; }
-  hideCallWidget();
-  activeCallId = null;
-}
-
-async function endCall(){
-  const wasId = activeCallId;
-  const wasClassId = classId;
-  cleanupCallLocal();
-  render();
-  if(wasId){
-    try{ await db.collection('classes').doc(wasClassId).collection('calls').doc(wasId).update({ status: 'ended' }); }catch(e){}
-  }
-}
-
-function showCallWidget(peerName, isCaller){
-  let widget = document.getElementById('call-widget');
-  if(!widget){
-    widget = document.createElement('div');
-    widget.id = 'call-widget';
-    widget.className = 'call-widget';
-    widget.innerHTML = `
-      <div class="call-widget-head" id="call-widget-head">
-        <span id="call-widget-title"></span>
-        <button class="call-icon-btn" id="call-minimize" title="Minimize">–</button>
-      </div>
-      <div class="call-widget-body">
-        <video id="call-remote-video" autoplay playsinline></video>
-        <video id="call-local-video" autoplay playsinline muted></video>
-        <div class="call-status" id="call-status"></div>
-        <div class="call-controls">
-          <button class="btn small" id="call-toggle-mic">Mute</button>
-          <button class="btn small" id="call-toggle-cam">Camera off</button>
-          <button class="btn small danger" id="call-end">End call</button>
-        </div>
-      </div>`;
-    document.body.appendChild(widget);
-    makeCallWidgetDraggable(widget, document.getElementById('call-widget-head'));
-    document.getElementById('call-end').onclick = ()=> endCall();
-    document.getElementById('call-toggle-mic').onclick = toggleCallMic;
-    document.getElementById('call-toggle-cam').onclick = toggleCallCam;
-    document.getElementById('call-minimize').onclick = ()=> widget.classList.toggle('minimized');
-  }
-  document.getElementById('call-widget-title').textContent = `Call with ${peerName}`;
-  setCallStatus(isCaller ? 'Calling…' : 'Connecting…');
-  widget.classList.remove('minimized');
-  const localVideo = document.getElementById('call-local-video');
-  if(localVideo) localVideo.srcObject = localStream;
-}
-function hideCallWidget(){ const w = document.getElementById('call-widget'); if(w) w.remove(); }
-function setCallStatus(text){ const el = document.getElementById('call-status'); if(el) el.textContent = text; }
-function toggleCallMic(){
-  if(!localStream) return;
-  const track = localStream.getAudioTracks()[0]; if(!track) return;
-  track.enabled = !track.enabled;
-  document.getElementById('call-toggle-mic').textContent = track.enabled ? 'Mute' : 'Unmute';
-}
-function toggleCallCam(){
-  if(!localStream) return;
-  const track = localStream.getVideoTracks()[0]; if(!track) return;
-  track.enabled = !track.enabled;
-  document.getElementById('call-toggle-cam').textContent = track.enabled ? 'Camera off' : 'Camera on';
-}
-function makeCallWidgetDraggable(el, handle){
-  let offX = 0, offY = 0, dragging = false;
-  handle.addEventListener('pointerdown', (e)=>{
-    dragging = true;
-    const rect = el.getBoundingClientRect();
-    offX = e.clientX - rect.left; offY = e.clientY - rect.top;
-    el.style.right = 'auto'; el.style.bottom = 'auto';
-    handle.setPointerCapture(e.pointerId);
-  });
-  handle.addEventListener('pointermove', (e)=>{
-    if(!dragging) return;
-    el.style.left = Math.min(window.innerWidth - 60, Math.max(0, e.clientX - offX)) + 'px';
-    el.style.top = Math.min(window.innerHeight - 40, Math.max(0, e.clientY - offY)) + 'px';
-  });
-  handle.addEventListener('pointerup', ()=>{ dragging = false; });
-}
 
 /* --------------------------- 4. ACTIONS --------------------------- */
 function statusFor(assignment){

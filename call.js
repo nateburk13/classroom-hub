@@ -387,6 +387,15 @@
     watchIncoming();
   }
 
+  // Start a call directly by id/name — used by any UI that already knows who
+  // to call (e.g. a teacher's "Video call" button next to a specific student
+  // in the Students tab), bypassing the "call someone" panel/picker.
+  function callPerson(id, name){
+    if(!ctx){ return; }
+    if(inCallWith || callDocRef){ alert('You are already in a call — end it before starting another.'); return; }
+    startCall({ id, name });
+  }
+
   function teardown(){
     stopRinging();
     if(unsubPresence){ unsubPresence(); unsubPresence = null; }
@@ -399,5 +408,5 @@
     ctx = null;
   }
 
-  window.ClassroomCall = { init, teardown };
+  window.ClassroomCall = { init, teardown, callPerson };
 })();
