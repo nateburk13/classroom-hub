@@ -11,8 +11,17 @@
      teardown()                               — call when leaving/switching class
    ========================================================================= */
 (function(){
+  // STUN alone only works when both sides can be reached directly; many
+  // school/mobile networks block that, so calls connect briefly then die.
+  // The TURN entries below (Open Relay Project's free public TURN service)
+  // relay the media instead, as a fallback when direct P2P isn't possible.
+  // Free/shared, so treat it as a stopgap — for heavier use, swap in your
+  // own TURN credentials (e.g. Twilio, Cloudflare, or a self-hosted coturn).
   const ICE_SERVERS = [
-    { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }
+    { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
+    { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+    { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+    { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }
   ];
   const ONLINE_WINDOW_MS = 60000; // matches the presence heartbeat elsewhere
   const RING_TIMEOUT_MS = 30000;
@@ -312,13 +321,34 @@
       if(remoteVideoEl.srcObject !== e.streams[0]) remoteVideoEl.srcObject = e.streams[0];
     };
     conn.onconnectionstatechange = ()=>{
-      if(['disconnected','failed','closed'].includes(conn.connectionState)) endCall(null);
+      if(conn.connectionState === 'failed' || conn.connectionState === 'closed'){
+        clearTimeout(disconnectGraceTimer);
+        endCall(null);
+      }else if(conn.connectionState === 'disconnected'){
+        // Networks blip — ICE often recovers on its own within a few seconds.
+        // Give it a grace window before treating it as a real hang-up, and
+        // cancel that timer if the state improves before it fires.
+        showStatus('Connection interrupted — trying to reconnect…');
+        clearTimeout(disconnectGraceTimer);
+        disconnectGraceTimer = setTimeout(()=>{
+          if(conn.connectionState === 'disconnected') endCall(null, 'Call dropped — the connection was lost.');
+        }, 8000);
+      }else if(conn.connectionState === 'connected'){
+        clearTimeout(disconnectGraceTimer);
+        showStatus(inCallWith ? `In call with ${inCallWith.name}` : '');
+      }
     };
     return conn;
+  }
+  let disconnectGraceTimer = null;
+  function showStatus(text){
+    const el = bubbleEl && bubbleEl.querySelector('#cc-bubble-status');
+    if(el) el.textContent = text;
   }
 
   function endCall(setStatus, note){
     clearTimeout(ringTimer);
+    clearTimeout(disconnectGraceTimer);
     if(setStatus && callDocRef) callDocRef.update({ status: setStatus }).catch(()=>{});
     else if(callDocRef) callDocRef.update({ status: 'ended' }).catch(()=>{});
     if(unsubCallDoc){ unsubCallDoc(); unsubCallDoc = null; }
