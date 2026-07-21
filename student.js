@@ -126,8 +126,18 @@ function touchPresence(){
   if(!classId) return;
   db.collection('classes').doc(classId).collection('presence').doc(studentDocId())
     .set({ studentName, role: 'student', lastSeen: firebase.firestore.FieldValue.serverTimestamp() }, { merge: true })
-    .catch(()=>{ /* best-effort — a missed heartbeat just means we look offline sooner */ });
+    .then(()=>{ presenceOk = true; })
+    .catch((e)=>{
+      // best-effort in normal operation, but surface it visibly once so a
+      // teacher/student without console access can tell something's wrong
+      presenceOk = false;
+      presenceError = (e && e.code) ? e.code : 'unknown error';
+      const label = document.getElementById('sync-label');
+      if(label) label.textContent = `Presence blocked (${presenceError}) — see README`;
+    });
 }
+let presenceOk = null;
+let presenceError = '';
 function startPresence(){
   stopPresence();
   touchPresence();
