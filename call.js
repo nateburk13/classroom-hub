@@ -260,12 +260,21 @@
       }
     }, RING_TIMEOUT_MS);
 
+    // The callee can start sending ICE candidates as soon as they answer —
+    // which can arrive here before we've finished setRemoteDescription below.
+    // Adding a candidate before that throws, so buffer anything that shows up
+    // early and flush it once the remote description is actually set.
+    let remoteDescSet = false;
+    let pendingCandidates = [];
     unsubCallDoc = callDocRef.onSnapshot(async doc=>{
       const data = doc.data();
       if(!data) return;
       if(data.answer && pc && !pc.currentRemoteDescription){
         clearTimeout(ringTimer);
         await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+        remoteDescSet = true;
+        for(const c of pendingCandidates){ pc.addIceCandidate(new RTCIceCandidate(c)).catch(()=>{}); }
+        pendingCandidates = [];
         showBubble(`In call with ${target.name}`);
       }
       if(data.status === 'declined'){ endCall(null, `${target.name} declined the call.`); }
@@ -274,7 +283,10 @@
 
     unsubTheirCandidates = callDocRef.collection('calleeCandidates').onSnapshot(snap=>{
       snap.docChanges().forEach(change=>{
-        if(change.type === 'added' && pc) pc.addIceCandidate(new RTCIceCandidate(change.doc.data())).catch(()=>{});
+        if(change.type !== 'added') return;
+        const candidate = change.doc.data();
+        if(remoteDescSet && pc) pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(()=>{});
+        else pendingCandidates.push(candidate);
       });
     });
   }
