@@ -330,24 +330,38 @@
   function buildPeerConnection(){
     const conn = new RTCPeerConnection({ iceServers: ICE_SERVERS });
     conn.ontrack = e=>{
-      if(remoteVideoEl.srcObject !== e.streams[0]) remoteVideoEl.srcObject = e.streams[0];
+      // Prefer the bundled stream when present, but some browsers (notably
+      // older iOS Safari) don't populate e.streams — fall back to building
+      // one from the track directly so video still shows up there.
+      const stream = e.streams && e.streams[0] ? e.streams[0] : new MediaStream([e.track]);
+      if(remoteVideoEl.srcObject !== stream) remoteVideoEl.srcObject = stream;
+      remoteVideoEl.play().catch(()=>{}); // autoplay can be blocked silently; retry after a user gesture already happened (Accept/Call tap)
+    };
+    conn.oniceconnectionstatechange = ()=>{
+      // Visible, non-technical status so problems are diagnosable from a
+      // phone with no access to devtools.
+      const state = conn.iceConnectionState;
+      if(state === 'checking') showStatus('Connecting…');
+      else if(state === 'connected' || state === 'completed') reportConnectionType();
+      else if(state === 'disconnected') showStatus('Connection interrupted — trying to reconnect…');
+      else if(state === 'failed') showStatus("Couldn't connect — network may be blocking the call.");
     };
     conn.onconnectionstatechange = ()=>{
       if(conn.connectionState === 'failed' || conn.connectionState === 'closed'){
         clearTimeout(disconnectGraceTimer);
-        endCall(null);
+        endCall(null, conn.connectionState === 'failed'
+          ? "Call couldn't connect — this often means the network is blocking video calls. Try a different wifi/network on one side."
+          : null);
       }else if(conn.connectionState === 'disconnected'){
         // Networks blip — ICE often recovers on its own within a few seconds.
         // Give it a grace window before treating it as a real hang-up, and
         // cancel that timer if the state improves before it fires.
-        showStatus('Connection interrupted — trying to reconnect…');
         clearTimeout(disconnectGraceTimer);
         disconnectGraceTimer = setTimeout(()=>{
           if(conn.connectionState === 'disconnected') endCall(null, 'Call dropped — the connection was lost.');
         }, 8000);
       }else if(conn.connectionState === 'connected'){
         clearTimeout(disconnectGraceTimer);
-        showStatus(inCallWith ? `In call with ${inCallWith.name}` : '');
       }
     };
     return conn;
@@ -356,6 +370,26 @@
   function showStatus(text){
     const el = bubbleEl && bubbleEl.querySelector('#cc-bubble-status');
     if(el) el.textContent = text;
+  }
+  // Once connected, check whether the media path is direct (host/srflx) or
+  // relayed through TURN — shown in the bubble so a stuck "blank video" case
+  // can be told apart from a real no-connection case.
+  async function reportConnectionType(){
+    if(!pc) return;
+    try{
+      const stats = await pc.getStats();
+      let pairType = null;
+      stats.forEach(r=>{
+        if(r.type === 'candidate-pair' && r.state === 'succeeded' && r.nominated){
+          const local = stats.get(r.localCandidateId);
+          if(local) pairType = local.candidateType; // host | srflx | relay
+        }
+      });
+      const label = pairType === 'relay' ? 'connected (relayed)' : pairType ? 'connected (direct)' : 'connected';
+      showStatus(inCallWith ? `In call with ${inCallWith.name} — ${label}` : label);
+    }catch(e){
+      showStatus(inCallWith ? `In call with ${inCallWith.name}` : '');
+    }
   }
 
   function endCall(setStatus, note){
