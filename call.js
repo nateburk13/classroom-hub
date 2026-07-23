@@ -43,6 +43,28 @@
   let root, fabBtn, fabBadge, panelEl, incomingEl, bubbleEl, localVideoEl, remoteVideoEl;
   let dragState = null;
 
+  // ------- screen share -------
+  let screenStream = null;
+  let cameraTrack = null;          // original camera track, kept so we can restore it
+  let isScreenSharing = false;
+
+  // ------- expand / enlarge -------
+  let isExpanded = false;
+
+  // ------- remote-control data channel -------
+  // Lets the *viewer* of a shared screen relay clicks/keystrokes back to the
+  // sharer, who replays them on their own page. This only ever touches the
+  // Classroom Hub page itself (via document.elementFromPoint + synthetic
+  // events) — a browser cannot hand a webpage real OS-level control of
+  // someone else's mouse/keyboard, so this is intentionally scoped to
+  // controlling the shared page rather than pretending to be a full
+  // remote-desktop tool. Works best when the sharer picks "This Tab".
+  let controlChannel = null;
+  let controlChannelOpen = false;
+  let iAmSharingAndGrantedControl = false;  // I'm sharing my screen and let them drive
+  let iAmControllingThem = false;           // I've been granted control of their screen
+  let controlRequestEl = null;
+
   function el(html){ const d = document.createElement('div'); d.innerHTML = html.trim(); return d.firstChild; }
   function esc(str){ const d = document.createElement('div'); d.textContent = str ?? ''; return d.innerHTML; }
   function tsVal(ts){ return ts && ts.toMillis ? ts.toMillis() : (ts || 0); }
@@ -106,9 +128,13 @@
         <video id="cc-remote-video" class="cc-remote-video" autoplay playsinline></video>
         <video id="cc-local-video" class="cc-local-video" autoplay playsinline muted></video>
         <div class="cc-bubble-status" id="cc-bubble-status"></div>
+        <div class="cc-control-banner hidden" id="cc-control-banner"></div>
         <div class="cc-bubble-controls">
           <button class="cc-ctrl" id="cc-toggle-mic" title="Mute / unmute" aria-label="Mute or unmute microphone">\u{1F3A4}</button>
           <button class="cc-ctrl" id="cc-toggle-cam" title="Camera on / off" aria-label="Turn camera on or off">\u{1F4F9}</button>
+          <button class="cc-ctrl" id="cc-toggle-share" title="Share your screen" aria-label="Share your screen">\u{1F5A5}\uFE0F</button>
+          <button class="cc-ctrl" id="cc-request-control" title="Request control of their screen" aria-label="Request control of their screen">\u{1F5B1}\uFE0F</button>
+          <button class="cc-ctrl cc-ctrl-expand" id="cc-expand" title="Enlarge" aria-label="Enlarge call window">\u26F6</button>
           <button class="cc-ctrl cc-ctrl-min" id="cc-minimize" title="Minimize" aria-label="Minimize call">\u2014</button>
           <button class="cc-ctrl cc-ctrl-end" id="cc-hangup" title="Hang up" aria-label="Hang up call">\u2715</button>
         </div>
@@ -121,7 +147,14 @@
     bubbleEl.querySelector('#cc-minimize').addEventListener('click', toggleMinimize);
     bubbleEl.querySelector('#cc-toggle-mic').addEventListener('click', toggleMic);
     bubbleEl.querySelector('#cc-toggle-cam').addEventListener('click', toggleCam);
+    bubbleEl.querySelector('#cc-toggle-share').addEventListener('click', toggleScreenShare);
+    bubbleEl.querySelector('#cc-request-control').addEventListener('click', requestControlOfThem);
+    bubbleEl.querySelector('#cc-expand').addEventListener('click', toggleExpand);
     makeDraggable(bubbleEl);
+    wireRemoteVideoInputCapture();
+
+    controlRequestEl = el(`<div id="cc-control-request" class="cc-incoming hidden"></div>`);
+    root.appendChild(controlRequestEl);
   }
 
   function togglePanel(){
@@ -237,6 +270,9 @@
     callRoleInCall = 'caller';
     pc = buildPeerConnection();
     localStream.getTracks().forEach(t=> pc.addTrack(t, localStream));
+    cameraTrack = localStream.getVideoTracks()[0] || null;
+    controlChannel = pc.createDataChannel('control');
+    wireControlChannel(controlChannel);
     showBubble(`Calling ${target.name}\u2026`);
 
     callDocRef = callsCol().doc();
@@ -306,6 +342,7 @@
     callDocRef = callsCol().doc(callId);
     pc = buildPeerConnection();
     localStream.getTracks().forEach(t=> pc.addTrack(t, localStream));
+    cameraTrack = localStream.getVideoTracks()[0] || null;
     showBubble(`In call with ${data.callerName}`);
 
     pc.onicecandidate = e=>{ if(e.candidate) callDocRef.collection('calleeCandidates').add(e.candidate.toJSON()).catch(()=>{}); };
@@ -329,6 +366,9 @@
   /* --------------------------- shared peer connection --------------------------- */
   function buildPeerConnection(){
     const conn = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    conn.ondatachannel = e=>{
+      if(e.channel.label === 'control'){ controlChannel = e.channel; wireControlChannel(controlChannel); }
+    };
     conn.ontrack = e=>{
       // Prefer the bundled stream when present, but some browsers (notably
       // older iOS Safari) don't populate e.streams — fall back to building
@@ -399,6 +439,14 @@
     else if(callDocRef) callDocRef.update({ status: 'ended' }).catch(()=>{});
     if(unsubCallDoc){ unsubCallDoc(); unsubCallDoc = null; }
     if(unsubTheirCandidates){ unsubTheirCandidates(); unsubTheirCandidates = null; }
+    if(screenStream){ screenStream.getTracks().forEach(t=> t.stop()); screenStream = null; }
+    if(controlChannel){ try{ controlChannel.close(); }catch(e){} controlChannel = null; }
+    controlChannelOpen = false;
+    iAmSharingAndGrantedControl = false;
+    iAmControllingThem = false;
+    isScreenSharing = false;
+    cameraTrack = null;
+    if(controlRequestEl) controlRequestEl.classList.add('hidden');
     if(pc){ pc.close(); pc = null; }
     if(localStream){ localStream.getTracks().forEach(t=> t.stop()); localStream = null; }
     if(localVideoEl) localVideoEl.srcObject = null;
@@ -406,6 +454,9 @@
     callDocRef = null;
     inCallWith = null;
     callRoleInCall = null;
+    isExpanded = false;
+    if(bubbleEl) bubbleEl.classList.remove('cc-bubble-expanded');
+    updateControlUI();
     hideBubble();
     if(note) setTimeout(()=> alert(note), 50);
   }
@@ -417,7 +468,10 @@
     if(localVideoEl) localVideoEl.srcObject = localStream;
   }
   function hideBubble(){ bubbleEl.classList.add('hidden'); }
-  function toggleMinimize(){ bubbleEl.classList.toggle('cc-bubble-min'); }
+  function toggleMinimize(){
+    if(isExpanded) toggleExpand();
+    bubbleEl.classList.toggle('cc-bubble-min');
+  }
   function toggleMic(){
     if(!localStream) return;
     localStream.getAudioTracks().forEach(t=> t.enabled = !t.enabled);
@@ -431,9 +485,203 @@
     bubbleEl.querySelector('#cc-toggle-cam').classList.toggle('cc-ctrl-off', !on);
   }
 
+  /* --------------------------- enlarge / expand --------------------------- */
+  // Works the same way on phones, tablets, and desktops — it just docks the
+  // bubble into a large centered panel instead of the small draggable one.
+  function toggleExpand(){
+    if(!bubbleEl) return;
+    isExpanded = !isExpanded;
+    bubbleEl.classList.toggle('cc-bubble-expanded', isExpanded);
+    const btn = bubbleEl.querySelector('#cc-expand');
+    if(btn){ btn.classList.toggle('cc-ctrl-active', isExpanded); btn.title = isExpanded ? 'Shrink' : 'Enlarge'; }
+    if(isExpanded){ bubbleEl.style.left = ''; bubbleEl.style.top = ''; bubbleEl.style.right = ''; bubbleEl.style.bottom = ''; }
+  }
+
+  /* --------------------------- screen sharing --------------------------- */
+  async function toggleScreenShare(){
+    if(!pc || !localStream) return;
+    if(isScreenSharing){ await stopScreenShare(); return; }
+    if(!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia){
+      alert("This browser doesn't support screen sharing.");
+      return;
+    }
+    try{
+      screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+    }catch(e){
+      return; // user cancelled the picker — nothing to do
+    }
+    const screenTrack = screenStream.getVideoTracks()[0];
+    const sender = pc.getSenders().find(s=> s.track && s.track.kind === 'video');
+    if(sender) await sender.replaceTrack(screenTrack);
+    if(localVideoEl) localVideoEl.srcObject = screenStream;
+    isScreenSharing = true;
+    bubbleEl.querySelector('#cc-toggle-share').classList.add('cc-ctrl-active');
+    // If the person stops sharing from the browser's own "Stop sharing" bar
+    // instead of our button, catch that and revert automatically.
+    screenTrack.onended = ()=> stopScreenShare();
+    updateControlUI();
+  }
+
+  async function stopScreenShare(){
+    if(screenStream){ screenStream.getTracks().forEach(t=> t.stop()); screenStream = null; }
+    isScreenSharing = false;
+    iAmSharingAndGrantedControl = false;
+    if(pc && cameraTrack){
+      const sender = pc.getSenders().find(s=> s.track && s.track.kind === 'video');
+      if(sender) await sender.replaceTrack(cameraTrack).catch(()=>{});
+    }
+    if(localVideoEl) localVideoEl.srcObject = localStream;
+    if(bubbleEl){
+      bubbleEl.querySelector('#cc-toggle-share').classList.remove('cc-ctrl-active');
+    }
+    sendControlMessage({ type: 'sharing-stopped' });
+    updateControlUI();
+  }
+
+  /* --------------------------- remote control --------------------------- */
+  function wireControlChannel(channel){
+    channel.onopen = ()=>{ controlChannelOpen = true; updateControlUI(); };
+    channel.onclose = ()=>{ controlChannelOpen = false; iAmControllingThem = false; iAmSharingAndGrantedControl = false; updateControlUI(); };
+    channel.onmessage = e=>{
+      let msg; try{ msg = JSON.parse(e.data); }catch(err){ return; }
+      handleControlMessage(msg);
+    };
+  }
+
+  function sendControlMessage(msg){
+    if(controlChannel && controlChannel.readyState === 'open') controlChannel.send(JSON.stringify(msg));
+  }
+
+  function requestControlOfThem(){
+    if(!controlChannelOpen){ alert("Not connected yet — try again in a moment."); return; }
+    sendControlMessage({ type: 'request-control', fromName: ctx.myName });
+    showStatus('Requested control — waiting for them to accept…');
+  }
+
+  function handleControlMessage(msg){
+    if(!msg || !msg.type) return;
+    switch(msg.type){
+      case 'request-control':
+        showControlRequestPrompt(msg.fromName || 'The other person');
+        break;
+      case 'grant-control':
+        iAmControllingThem = true;
+        updateControlUI();
+        showStatus(`You're controlling ${inCallWith ? inCallWith.name : 'their'} screen`);
+        break;
+      case 'deny-control':
+        alert(`${inCallWith ? inCallWith.name : 'They'} declined to share control.`);
+        break;
+      case 'revoke-control':
+      case 'sharing-stopped':
+        iAmControllingThem = false;
+        updateControlUI();
+        break;
+      case 'input':
+        if(iAmSharingAndGrantedControl) applyIncomingInput(msg);
+        break;
+    }
+  }
+
+  function showControlRequestPrompt(fromName){
+    if(!controlRequestEl) return;
+    controlRequestEl.innerHTML = `
+      <div class="cc-incoming-card">
+        <div class="cc-incoming-title">${esc(fromName)} wants control of your screen\u2026</div>
+        <div class="cc-incoming-actions">
+          <button class="btn primary" id="cc-allow-control">Allow</button>
+          <button class="btn danger" id="cc-deny-control">Deny</button>
+        </div>
+      </div>`;
+    controlRequestEl.classList.remove('hidden');
+    controlRequestEl.querySelector('#cc-allow-control').onclick = ()=>{
+      controlRequestEl.classList.add('hidden');
+      iAmSharingAndGrantedControl = true;
+      updateControlUI();
+      sendControlMessage({ type: 'grant-control' });
+    };
+    controlRequestEl.querySelector('#cc-deny-control').onclick = ()=>{
+      controlRequestEl.classList.add('hidden');
+      sendControlMessage({ type: 'deny-control' });
+    };
+  }
+
+  function updateControlUI(){
+    const banner = bubbleEl && bubbleEl.querySelector('#cc-control-banner');
+    if(!banner) return;
+    if(iAmSharingAndGrantedControl){
+      banner.textContent = `${inCallWith ? inCallWith.name : 'They'} can click and type on your shared screen`;
+      banner.classList.remove('hidden');
+    }else if(iAmControllingThem){
+      banner.textContent = `You're controlling their screen — click/type on the video`;
+      banner.classList.remove('hidden');
+    }else{
+      banner.classList.add('hidden');
+    }
+    const reqBtn = bubbleEl && bubbleEl.querySelector('#cc-request-control');
+    if(reqBtn) reqBtn.classList.toggle('cc-ctrl-active', iAmControllingThem);
+  }
+
+  // Captures clicks/keystrokes made on the remote video element (while I've
+  // been granted control) and relays them, normalized 0–1 so they map onto
+  // the sharer's own viewport regardless of window size.
+  function wireRemoteVideoInputCapture(){
+    remoteVideoEl.addEventListener('click', e=>{
+      if(!iAmControllingThem) return;
+      const rect = remoteVideoEl.getBoundingClientRect();
+      const nx = (e.clientX - rect.left) / rect.width;
+      const ny = (e.clientY - rect.top) / rect.height;
+      sendControlMessage({ type: 'input', kind: 'click', nx, ny });
+    });
+    remoteVideoEl.tabIndex = 0; // so it can receive keyboard focus/events
+    remoteVideoEl.addEventListener('keydown', e=>{
+      if(!iAmControllingThem) return;
+      sendControlMessage({ type: 'input', kind: 'keydown', key: e.key });
+      e.preventDefault();
+    });
+  }
+
+  function applyIncomingInput(msg){
+    if(msg.kind === 'click' && typeof msg.nx === 'number'){
+      const x = msg.nx * window.innerWidth;
+      const y = msg.ny * window.innerHeight;
+      const target = document.elementFromPoint(x, y);
+      if(target){
+        target.focus && target.focus();
+        target.dispatchEvent(new MouseEvent('mousedown', { bubbles:true, clientX:x, clientY:y }));
+        target.dispatchEvent(new MouseEvent('mouseup', { bubbles:true, clientX:x, clientY:y }));
+        target.dispatchEvent(new MouseEvent('click', { bubbles:true, clientX:x, clientY:y }));
+      }
+    }else if(msg.kind === 'keydown' && msg.key){
+      const target = document.activeElement;
+      if(target){
+        if((target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') && msg.key.length === 1){
+          const start = target.selectionStart ?? target.value.length;
+          const end = target.selectionEnd ?? target.value.length;
+          target.value = target.value.slice(0, start) + msg.key + target.value.slice(end);
+          target.selectionStart = target.selectionEnd = start + 1;
+          target.dispatchEvent(new Event('input', { bubbles:true }));
+        }else if((target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') && msg.key === 'Backspace'){
+          const start = target.selectionStart ?? target.value.length;
+          const end = target.selectionEnd ?? target.value.length;
+          if(start === end && start > 0){
+            target.value = target.value.slice(0, start-1) + target.value.slice(end);
+            target.selectionStart = target.selectionEnd = start - 1;
+          }else{
+            target.value = target.value.slice(0, start) + target.value.slice(end);
+            target.selectionStart = target.selectionEnd = start;
+          }
+          target.dispatchEvent(new Event('input', { bubbles:true }));
+        }
+        target.dispatchEvent(new KeyboardEvent('keydown', { key: msg.key, bubbles:true }));
+      }
+    }
+  }
+
   function makeDraggable(node){
     node.addEventListener('pointerdown', e=>{
       if(e.target.closest('.cc-ctrl')) return; // don't drag when tapping a control
+      if(isExpanded) return; // expanded view is docked, not draggable
       const rect = node.getBoundingClientRect();
       dragState = { offX: e.clientX - rect.left, offY: e.clientY - rect.top };
       node.setPointerCapture(e.pointerId);
