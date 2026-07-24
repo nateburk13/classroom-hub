@@ -133,6 +133,7 @@
           <button class="cc-ctrl" id="cc-toggle-mic" title="Mute / unmute" aria-label="Mute or unmute microphone">\u{1F3A4}</button>
           <button class="cc-ctrl" id="cc-toggle-cam" title="Camera on / off" aria-label="Turn camera on or off">\u{1F4F9}</button>
           <button class="cc-ctrl" id="cc-toggle-share" title="Share your screen" aria-label="Share your screen">\u{1F5A5}\uFE0F</button>
+          <button class="cc-ctrl" id="cc-whiteboard" title="Open shared whiteboard" aria-label="Open shared whiteboard">\u{1F58A}\uFE0F</button>
           <button class="cc-ctrl" id="cc-request-control" title="Request control of their screen" aria-label="Request control of their screen">\u{1F5B1}\uFE0F</button>
           <button class="cc-ctrl cc-ctrl-expand" id="cc-expand" title="Enlarge" aria-label="Enlarge call window">\u26F6</button>
           <button class="cc-ctrl cc-ctrl-min" id="cc-minimize" title="Minimize" aria-label="Minimize call">\u2014</button>
@@ -148,6 +149,7 @@
     bubbleEl.querySelector('#cc-toggle-mic').addEventListener('click', toggleMic);
     bubbleEl.querySelector('#cc-toggle-cam').addEventListener('click', toggleCam);
     bubbleEl.querySelector('#cc-toggle-share').addEventListener('click', toggleScreenShare);
+    bubbleEl.querySelector('#cc-whiteboard').addEventListener('click', openSharedWhiteboard);
     bubbleEl.querySelector('#cc-request-control').addEventListener('click', requestControlOfThem);
     bubbleEl.querySelector('#cc-expand').addEventListener('click', toggleExpand);
     makeDraggable(bubbleEl);
@@ -447,6 +449,7 @@
     isScreenSharing = false;
     cameraTrack = null;
     if(controlRequestEl) controlRequestEl.classList.add('hidden');
+    if(window.Whiteboard) window.Whiteboard.closeOverlay();
     if(pc){ pc.close(); pc = null; }
     if(localStream){ localStream.getTracks().forEach(t=> t.stop()); localStream = null; }
     if(localVideoEl) localVideoEl.srcObject = null;
@@ -483,6 +486,16 @@
     localStream.getVideoTracks().forEach(t=> t.enabled = !t.enabled);
     const on = localStream.getVideoTracks()[0] ? localStream.getVideoTracks()[0].enabled : true;
     bubbleEl.querySelector('#cc-toggle-cam').classList.toggle('cc-ctrl-off', !on);
+  }
+
+  /* --------------------------- shared whiteboard (during a call) --------------------------- */
+  // Both sides already know the call's Firestore doc id (caller creates it,
+  // callee is handed it), so it doubles as a stable key both peers converge
+  // on for the same board — no extra signaling needed.
+  function openSharedWhiteboard(){
+    if(!window.Whiteboard){ alert('Whiteboard module not loaded.'); return; }
+    if(!callDocRef){ alert('Start or answer a call first.'); return; }
+    window.Whiteboard.openOverlay(callDocRef.id, inCallWith ? inCallWith.name : null);
   }
 
   /* --------------------------- enlarge / expand --------------------------- */

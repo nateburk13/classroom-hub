@@ -256,6 +256,7 @@ function teardownListeners(){
   unsubAssignments = unsubAnnouncements = unsubQuizzes = unsubBooks = unsubPresence = null;
   stopTeacherPresence();
   ClassroomCall.teardown();
+  Whiteboard.teardown();
   assignments = []; announcements = []; quizzes = []; books = []; presence = [];
   loaded = { assignments: false, announcements: false, quizzes: false, books: false, students: false };
 }
@@ -295,6 +296,7 @@ function startApp(id, info){
   renderClassSwitcher();
   startTeacherPresence();
   ClassroomCall.init({ classId, myId: TEACHER_PRESENCE_ID, myName: info.teacherName, myRole: 'teacher' });
+  Whiteboard.init({ classId, myId: TEACHER_PRESENCE_ID, myName: info.teacherName, myRole: 'teacher' });
 
   unsubAssignments = db.collection('classes').doc(classId).collection('assignments')
     .onSnapshot(async (snap)=>{
@@ -421,7 +423,7 @@ const viewRoot = document.getElementById('view-root');
 
 function render(){
   document.querySelectorAll('.nav-btn').forEach(b=> b.classList.toggle('active', b.dataset.view === currentView));
-  const renderers = { dashboard: renderDashboard, assignments: renderAssignments, announcements: renderAnnouncements, quizzes: renderQuizzes, books: renderBooks, students: renderStudents };
+  const renderers = { dashboard: renderDashboard, assignments: renderAssignments, announcements: renderAnnouncements, quizzes: renderQuizzes, books: renderBooks, students: renderStudents, whiteboard: renderWhiteboard };
   (renderers[currentView] || renderDashboard)();
 }
 
@@ -659,6 +661,18 @@ function renderBooks(){
 }
 
 function isOnline(p){ return (Date.now() - tsVal(p.lastSeen)) < PRESENCE_ONLINE_MS; }
+
+/* Live drawing is handled entirely by the shared whiteboard.js module
+   (window.Whiteboard) — it manages its own canvas + Firestore listeners, so
+   we only mount it once and leave it alone on unrelated re-renders (an
+   assignment/announcement update elsewhere shouldn't blow away an in-
+   progress drawing). */
+function renderWhiteboard(){
+  setHeader('Whiteboard', 'Draw together in real time with your class — boards are saved automatically for review.');
+  if(document.getElementById('wb-page')) return;
+  viewRoot.innerHTML = '<div id="wb-page"></div>';
+  Whiteboard.mountPage(document.getElementById('wb-page'));
+}
 
 function renderStudents(){
   setHeader('Students', 'Who has this class open right now, and when they were last active.');
@@ -1455,7 +1469,13 @@ function timeAgo(ts){
 
 /* --------------------------- 7. EVENT WIRING --------------------------- */
 document.querySelectorAll('.nav-btn').forEach(btn=>{
-  btn.addEventListener('click', ()=>{ currentView = btn.dataset.view; render(); });
+  btn.addEventListener('click', ()=>{
+    if(currentView === 'whiteboard' && btn.dataset.view !== 'whiteboard'){
+      const wbPage = document.getElementById('wb-page');
+      if(wbPage && wbPage._wbTeardown) wbPage._wbTeardown();
+    }
+    currentView = btn.dataset.view; render();
+  });
 });
 /* Note: the "leave/remove class" and "add another class" controls live in
    the sidebar's class-switcher box, which is rebuilt by renderClassSwitcher()

@@ -111,6 +111,7 @@ function teardownListeners(){
   unsubAssignments = unsubAnnouncements = unsubQuizzes = unsubBooks = null;
   stopPresence();
   ClassroomCall.teardown();
+  Whiteboard.teardown();
   if(unsubIncomingCall){ unsubIncomingCall(); unsubIncomingCall = null; }
   cleanupCallLocal();
   hideIncomingCallBanner();
@@ -357,6 +358,7 @@ function startApp(id, info, name){
   renderClassSwitcher();
   startPresence();
   ClassroomCall.init({ classId, myId: studentDocId(), myName: studentName, myRole: 'student' });
+  Whiteboard.init({ classId, myId: studentDocId(), myName: studentName, myRole: 'student' });
   listenForIncomingCalls();
 
   unsubAssignments = db.collection('classes').doc(classId).collection('assignments')
@@ -453,7 +455,7 @@ const viewRoot = document.getElementById('view-root');
 
 function render(){
   document.querySelectorAll('.nav-btn').forEach(b=> b.classList.toggle('active', b.dataset.view === currentView));
-  const renderers = { dashboard: renderDashboard, assignments: renderAssignments, announcements: renderAnnouncements, quizzes: renderQuizzes, books: renderBooks };
+  const renderers = { dashboard: renderDashboard, assignments: renderAssignments, announcements: renderAnnouncements, quizzes: renderQuizzes, books: renderBooks, whiteboard: renderWhiteboard };
   (renderers[currentView] || renderDashboard)();
 }
 
@@ -574,6 +576,15 @@ function renderBooks(){
   });
   viewRoot.innerHTML = html;
   viewRoot.querySelectorAll('[data-book-open]').forEach(b=> b.onclick = ()=> openBookViewer(b.dataset.bookOpen));
+}
+
+/* Live drawing is handled entirely by the shared whiteboard.js module
+   (window.Whiteboard) — mounted once and left alone on unrelated re-renders. */
+function renderWhiteboard(){
+  setHeader('Whiteboard', 'Draw together in real time with your class — boards are saved automatically for review.');
+  if(document.getElementById('wb-page')) return;
+  viewRoot.innerHTML = '<div id="wb-page"></div>';
+  Whiteboard.mountPage(document.getElementById('wb-page'));
 }
 
 function renderQuizzes(){
@@ -964,7 +975,13 @@ function timeAgo(ts){
 
 /* --------------------------- 7. EVENT WIRING --------------------------- */
 document.querySelectorAll('.nav-btn').forEach(btn=>{
-  btn.addEventListener('click', ()=>{ currentView = btn.dataset.view; render(); });
+  btn.addEventListener('click', ()=>{
+    if(currentView === 'whiteboard' && btn.dataset.view !== 'whiteboard'){
+      const wbPage = document.getElementById('wb-page');
+      if(wbPage && wbPage._wbTeardown) wbPage._wbTeardown();
+    }
+    currentView = btn.dataset.view; render();
+  });
 });
 /* Note: the "leave class" and "join another class" controls live in the
    sidebar's class-switcher box, rebuilt by renderClassSwitcher() on every
