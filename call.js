@@ -26,12 +26,24 @@
   const ONLINE_WINDOW_MS = 60000; // matches the presence heartbeat elsewhere
   const RING_TIMEOUT_MS = 30000;
 
+  // ------- reconnect handling -------
+  // Network blips happen constantly on school wifi. Rather than dropping the
+  // call the instant WebRTC reports "disconnected", the caller side actively
+  // retries with an ICE restart a few times before giving up.
+  const RECONNECT_CHECK_MS = 4000;
+  const RECONNECT_MAX_ATTEMPTS = 4;
+  const RECONNECT_TOTAL_CAP_MS = 30000;
+
   let ctx = null;                  // { classId, myId, myName, myRole }
   let others = [];                 // online people I could call, minus myself
   let unsubPresence = null;
   let unsubIncoming = null;
   let unsubCallDoc = null;
   let unsubTheirCandidates = null;
+  let unsubHistoryOut = null;    // calls I made
+  let unsubHistoryIn = null;     // calls made to me
+  let historyOut = [];
+  let historyIn = [];
 
   let pc = null;
   let localStream = null;
@@ -39,6 +51,11 @@
   let inCallWith = null;           // { id, name }
   let callRoleInCall = null;       // 'caller' | 'callee'
   let ringTimer = null;
+  let reconnectTimer = null;
+  let reconnectAttempts = 0;
+  let disconnectedSince = null;
+  let everConnected = false;
+  let lastHandledRestartSeq = 0;   // callee: which restart offer it last answered
 
   let root, fabBtn, fabBadge, panelEl, incomingEl, bubbleEl, localVideoEl, remoteVideoEl;
   let dragState = null;
@@ -46,6 +63,7 @@
   // ------- screen share -------
   let screenStream = null;
   let cameraTrack = null;          // original camera track, kept so we can restore it
+  let micTrack = null;             // original microphone track, kept so we can restore it after sharing tab audio
   let isScreenSharing = false;
 
   // ------- expand / enlarge -------
@@ -68,6 +86,14 @@
   function el(html){ const d = document.createElement('div'); d.innerHTML = html.trim(); return d.firstChild; }
   function esc(str){ const d = document.createElement('div'); d.textContent = str ?? ''; return d.innerHTML; }
   function tsVal(ts){ return ts && ts.toMillis ? ts.toMillis() : (ts || 0); }
+  function timeAgo(ts){
+    if(!ts) return 'just now';
+    const mins = Math.floor((Date.now()-ts)/60000);
+    if(mins < 60) return mins <= 1 ? 'just now' : `${mins} min ago`;
+    const hrs = Math.floor(mins/60);
+    if(hrs < 24) return `${hrs}h ago`;
+    return `${Math.floor(hrs/24)}d ago`;
+  }
   function isOnline(p){ return (Date.now() - tsVal(p.lastSeen)) < ONLINE_WINDOW_MS; }
   function callsCol(){ return db.collection('classes').doc(ctx.classId).collection('calls'); }
 
@@ -159,6 +185,57 @@
     root.appendChild(controlRequestEl);
   }
 
+  /* --------------------------- call history --------------------------- */
+  // Firestore (compat SDK) can't OR two `where` clauses in one query, so we
+  // run two listeners — calls where I'm the caller, and calls where I'm the
+  // callee — and merge them client-side into one recent-calls list.
+  const HISTORY_LIMIT = 8;
+  function watchCallHistory(){
+    unsubHistoryOut = callsCol().where('callerId', '==', ctx.myId)
+      .orderBy('createdAt', 'desc').limit(HISTORY_LIMIT)
+      .onSnapshot(snap=>{
+        historyOut = snap.docs.map(d=>({ id: d.id, ...d.data() }));
+        if(panelEl && !panelEl.classList.contains('hidden')) renderPanel();
+      }, ()=>{});
+    unsubHistoryIn = callsCol().where('calleeId', '==', ctx.myId)
+      .orderBy('createdAt', 'desc').limit(HISTORY_LIMIT)
+      .onSnapshot(snap=>{
+        historyIn = snap.docs.map(d=>({ id: d.id, ...d.data() }));
+        if(panelEl && !panelEl.classList.contains('hidden')) renderPanel();
+      }, ()=>{});
+  }
+
+  function recentCallHistory(){
+    const merged = {};
+    [...historyOut, ...historyIn].forEach(c=> merged[c.id] = c);
+    return Object.values(merged)
+      .filter(c=> ['ended', 'missed', 'declined'].includes(c.status)) // only finished calls, not the one in progress
+      .sort((a,b)=> tsVal(b.createdAt) - tsVal(a.createdAt))
+      .slice(0, HISTORY_LIMIT);
+  }
+
+  function formatDuration(ms){
+    const totalSec = Math.round(ms/1000);
+    const m = Math.floor(totalSec/60), s = totalSec%60;
+    return m > 0 ? `${m}m ${s}s` : `${s}s`;
+  }
+
+  function historyRowHtml(c){
+    const outgoing = c.callerId === ctx.myId;
+    const otherName = outgoing ? c.calleeName : c.callerName;
+    const icon = outgoing ? '\u2197\uFE0F' : '\u2199\uFE0F';
+    let statusLabel;
+    if(c.status === 'missed') statusLabel = outgoing ? 'no answer' : 'missed';
+    else if(c.status === 'declined') statusLabel = 'declined';
+    else if(c.status === 'ended' && c.answeredAt && c.endedAt) statusLabel = formatDuration(tsVal(c.endedAt) - tsVal(c.answeredAt));
+    else statusLabel = 'ended';
+    return `<div class="cc-history-row">
+      <span class="cc-history-icon">${icon}</span>
+      <span class="cc-history-name">${esc(otherName || 'Unknown')}</span>
+      <span class="cc-history-meta">${esc(statusLabel)} \u00B7 ${timeAgo(tsVal(c.createdAt))}</span>
+    </div>`;
+  }
+
   function togglePanel(){
     if(!panelEl) return;
     if(panelEl.classList.contains('hidden')) renderPanel();
@@ -178,6 +255,11 @@
           <button class="cc-panel-call" data-call="${esc(p.id)}">\u{1F4DE}</button>
         </div>`;
       });
+    }
+    const history = recentCallHistory();
+    if(history.length > 0){
+      html += `<div class="cc-panel-head cc-history-head">Recent calls</div>`;
+      html += history.map(historyRowHtml).join('');
     }
     panelEl.innerHTML = html;
     panelEl.querySelectorAll('[data-call]').forEach(btn=>{
@@ -228,7 +310,7 @@
           if(change.type !== 'added' && change.type !== 'modified') return;
           if(data.status !== 'ringing') return;
           if(inCallWith || callDocRef){ // already busy — auto-decline
-            callsCol().doc(change.doc.id).update({ status: 'declined' }).catch(()=>{});
+            callsCol().doc(change.doc.id).update({ status: 'declined', endedAt: firebase.firestore.FieldValue.serverTimestamp() }).catch(()=>{});
             return;
           }
           showIncoming(change.doc.id, data);
@@ -250,7 +332,7 @@
     incomingEl.querySelector('#cc-decline').onclick = ()=>{
       stopRinging();
       incomingEl.classList.add('hidden');
-      callsCol().doc(callId).update({ status: 'declined' }).catch(()=>{});
+      callsCol().doc(callId).update({ status: 'declined', endedAt: firebase.firestore.FieldValue.serverTimestamp() }).catch(()=>{});
     };
     incomingEl.querySelector('#cc-accept').onclick = async ()=>{
       stopRinging();
@@ -270,9 +352,13 @@
     }
     inCallWith = { id: target.id, name: target.name };
     callRoleInCall = 'caller';
+    everConnected = false;
+    reconnectAttempts = 0;
+    disconnectedSince = null;
     pc = buildPeerConnection();
     localStream.getTracks().forEach(t=> pc.addTrack(t, localStream));
     cameraTrack = localStream.getVideoTracks()[0] || null;
+    micTrack = localStream.getAudioTracks()[0] || null;
     controlChannel = pc.createDataChannel('control');
     wireControlChannel(controlChannel);
     showBubble(`Calling ${target.name}\u2026`);
@@ -293,8 +379,7 @@
 
     ringTimer = setTimeout(()=>{
       if(callDocRef && callRoleInCall === 'caller'){
-        callDocRef.update({ status: 'missed' }).catch(()=>{});
-        endCall(null, 'No answer.');
+        endCall('missed', 'No answer.');
       }
     }, RING_TIMEOUT_MS);
 
@@ -314,6 +399,12 @@
         for(const c of pendingCandidates){ pc.addIceCandidate(new RTCIceCandidate(c)).catch(()=>{}); }
         pendingCandidates = [];
         showBubble(`In call with ${target.name}`);
+      }
+      // Response to an ICE-restart offer we sent from attemptIceRestart().
+      // signalingState is 'have-local-offer' only while we're mid-restart
+      // waiting on this exact answer, so it's safe to apply unconditionally.
+      if(data.restartAnswer && pc && pc.signalingState === 'have-local-offer'){
+        await pc.setRemoteDescription(new RTCSessionDescription(data.restartAnswer)).catch(()=>{});
       }
       if(data.status === 'declined'){ endCall(null, `${target.name} declined the call.`); }
       if(data.status === 'ended'){ endCall(null); }
@@ -336,15 +427,20 @@
       localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
     }catch(e){
       alert("Couldn't access your camera/microphone. Check your browser's permissions and try again.");
-      callsCol().doc(callId).update({ status: 'declined' }).catch(()=>{});
+      callsCol().doc(callId).update({ status: 'declined', endedAt: firebase.firestore.FieldValue.serverTimestamp() }).catch(()=>{});
       return;
     }
     inCallWith = { id: data.callerId, name: data.callerName };
     callRoleInCall = 'callee';
+    everConnected = false;
+    reconnectAttempts = 0;
+    disconnectedSince = null;
+    lastHandledRestartSeq = 0;
     callDocRef = callsCol().doc(callId);
     pc = buildPeerConnection();
     localStream.getTracks().forEach(t=> pc.addTrack(t, localStream));
     cameraTrack = localStream.getVideoTracks()[0] || null;
+    micTrack = localStream.getAudioTracks()[0] || null;
     showBubble(`In call with ${data.callerName}`);
 
     pc.onicecandidate = e=>{ if(e.candidate) callDocRef.collection('calleeCandidates').add(e.candidate.toJSON()).catch(()=>{}); };
@@ -352,11 +448,23 @@
     await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
-    await callDocRef.update({ answer: { type: answer.type, sdp: answer.sdp }, status: 'active' });
+    await callDocRef.update({ answer: { type: answer.type, sdp: answer.sdp }, status: 'active', answeredAt: firebase.firestore.FieldValue.serverTimestamp() });
 
-    unsubCallDoc = callDocRef.onSnapshot(doc=>{
+    unsubCallDoc = callDocRef.onSnapshot(async doc=>{
       const d = doc.data();
-      if(d && d.status === 'ended') endCall(null);
+      if(!d) return;
+      if(d.status === 'ended'){ endCall(null); return; }
+      // The caller renegotiates on network drops (see attemptIceRestart);
+      // each attempt bumps restartSeq so we only answer each one once.
+      if(d.restartOffer && d.restartSeq && d.restartSeq !== lastHandledRestartSeq && pc){
+        lastHandledRestartSeq = d.restartSeq;
+        try{
+          await pc.setRemoteDescription(new RTCSessionDescription(d.restartOffer));
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          await callDocRef.update({ restartAnswer: { type: answer.type, sdp: answer.sdp } });
+        }catch(e){ /* next restart attempt from the caller will retry */ }
+      }
     });
     unsubTheirCandidates = callDocRef.collection('callerCandidates').onSnapshot(snap=>{
       snap.docChanges().forEach(change=>{
@@ -385,30 +493,78 @@
       const state = conn.iceConnectionState;
       if(state === 'checking') showStatus('Connecting…');
       else if(state === 'connected' || state === 'completed') reportConnectionType();
-      else if(state === 'disconnected') showStatus('Connection interrupted — trying to reconnect…');
-      else if(state === 'failed') showStatus("Couldn't connect — network may be blocking the call.");
     };
     conn.onconnectionstatechange = ()=>{
-      if(conn.connectionState === 'failed' || conn.connectionState === 'closed'){
-        clearTimeout(disconnectGraceTimer);
-        endCall(null, conn.connectionState === 'failed'
-          ? "Call couldn't connect — this often means the network is blocking video calls. Try a different wifi/network on one side."
-          : null);
-      }else if(conn.connectionState === 'disconnected'){
-        // Networks blip — ICE often recovers on its own within a few seconds.
-        // Give it a grace window before treating it as a real hang-up, and
-        // cancel that timer if the state improves before it fires.
-        clearTimeout(disconnectGraceTimer);
-        disconnectGraceTimer = setTimeout(()=>{
-          if(conn.connectionState === 'disconnected') endCall(null, 'Call dropped — the connection was lost.');
-        }, 8000);
-      }else if(conn.connectionState === 'connected'){
-        clearTimeout(disconnectGraceTimer);
+      const state = conn.connectionState;
+      if(state === 'connected'){
+        handleReconnected();
+      }else if(state === 'failed' && !everConnected){
+        // Never got through in the first place — this is almost always a
+        // network blocking WebRTC outright, not something ICE restart fixes.
+        endCall(null, "Call couldn't connect — this often means the network is blocking video calls. Try a different wifi/network on one side.");
+      }else if(state === 'disconnected' || state === 'failed'){
+        handlePossibleDisconnect();
       }
+      // 'closed' happens after we've already called pc.close() ourselves
+      // (via endCall), so there's nothing further to do here for it.
     };
     return conn;
   }
-  let disconnectGraceTimer = null;
+
+  function handlePossibleDisconnect(){
+    if(!disconnectedSince) disconnectedSince = Date.now();
+    showStatus(`Connection interrupted — reconnecting\u2026`);
+    if(bubbleEl) bubbleEl.classList.add('cc-bubble-reconnecting');
+    scheduleReconnectCheck();
+  }
+
+  function handleReconnected(){
+    if(disconnectedSince) showStatus('Reconnected');
+    everConnected = true;
+    disconnectedSince = null;
+    reconnectAttempts = 0;
+    clearTimeout(reconnectTimer); reconnectTimer = null;
+    if(bubbleEl) bubbleEl.classList.remove('cc-bubble-reconnecting');
+    if(callRoleInCall === 'caller' && callDocRef) callDocRef.update({ status: 'active' }).catch(()=>{});
+    reportConnectionType();
+  }
+
+  function scheduleReconnectCheck(){
+    clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(async ()=>{
+      if(!pc || !disconnectedSince) return; // already cleaned up or reconnected
+      if(pc.connectionState === 'connected'){ handleReconnected(); return; }
+      if(Date.now() - disconnectedSince > RECONNECT_TOTAL_CAP_MS){
+        endCall(null, "Call dropped — couldn't reconnect after a network interruption.");
+        return;
+      }
+      // Only the caller drives the ICE restart (needs a fresh offer/answer
+      // exchange); the callee just keeps waiting for that restart offer to
+      // arrive and answers it automatically — see the callDoc listeners.
+      if(callRoleInCall === 'caller' && reconnectAttempts < RECONNECT_MAX_ATTEMPTS){
+        reconnectAttempts++;
+        showStatus(`Reconnecting\u2026 (attempt ${reconnectAttempts} of ${RECONNECT_MAX_ATTEMPTS})`);
+        await attemptIceRestart();
+      }
+      scheduleReconnectCheck();
+    }, RECONNECT_CHECK_MS);
+  }
+
+  // Caller-only: renegotiates with iceRestart:true and hands the new offer
+  // to the callee through the call doc. A `restartSeq` counter lets the
+  // callee tell restart attempts apart from the original offer/answer.
+  async function attemptIceRestart(){
+    if(!pc || !callDocRef || callRoleInCall !== 'caller') return;
+    try{
+      const offer = await pc.createOffer({ iceRestart: true });
+      await pc.setLocalDescription(offer);
+      await callDocRef.update({
+        restartOffer: { type: offer.type, sdp: offer.sdp },
+        restartSeq: firebase.firestore.FieldValue.increment(1),
+        status: 'reconnecting'
+      });
+    }catch(e){ /* next scheduled check will retry */ }
+  }
   function showStatus(text){
     const el = bubbleEl && bubbleEl.querySelector('#cc-bubble-status');
     if(el) el.textContent = text;
@@ -436,9 +592,12 @@
 
   function endCall(setStatus, note){
     clearTimeout(ringTimer);
-    clearTimeout(disconnectGraceTimer);
-    if(setStatus && callDocRef) callDocRef.update({ status: setStatus }).catch(()=>{});
-    else if(callDocRef) callDocRef.update({ status: 'ended' }).catch(()=>{});
+    clearTimeout(reconnectTimer); reconnectTimer = null;
+    reconnectAttempts = 0;
+    disconnectedSince = null;
+    everConnected = false;
+    if(setStatus && callDocRef) callDocRef.update({ status: setStatus, endedAt: firebase.firestore.FieldValue.serverTimestamp() }).catch(()=>{});
+    else if(callDocRef) callDocRef.update({ status: 'ended', endedAt: firebase.firestore.FieldValue.serverTimestamp() }).catch(()=>{});
     if(unsubCallDoc){ unsubCallDoc(); unsubCallDoc = null; }
     if(unsubTheirCandidates){ unsubTheirCandidates(); unsubTheirCandidates = null; }
     if(screenStream){ screenStream.getTracks().forEach(t=> t.stop()); screenStream = null; }
@@ -458,7 +617,7 @@
     inCallWith = null;
     callRoleInCall = null;
     isExpanded = false;
-    if(bubbleEl) bubbleEl.classList.remove('cc-bubble-expanded');
+    if(bubbleEl){ bubbleEl.classList.remove('cc-bubble-expanded'); bubbleEl.classList.remove('cc-bubble-reconnecting'); }
     updateControlUI();
     hideBubble();
     if(note) setTimeout(()=> alert(note), 50);
@@ -519,13 +678,24 @@
       return;
     }
     try{
-      screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+      screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
     }catch(e){
       return; // user cancelled the picker — nothing to do
     }
     const screenTrack = screenStream.getVideoTracks()[0];
     const sender = pc.getSenders().find(s=> s.track && s.track.kind === 'video');
     if(sender) await sender.replaceTrack(screenTrack);
+    // Not every share source has audio to capture (e.g. sharing a window, or
+    // "Entire Screen" on some OSes) — only swap the outgoing audio if the
+    // picker actually gave us a track.
+    const screenAudioTrack = screenStream.getAudioTracks()[0];
+    if(screenAudioTrack){
+      const audioSender = pc.getSenders().find(s=> s.track && s.track.kind === 'audio');
+      if(audioSender) await audioSender.replaceTrack(screenAudioTrack);
+      // If the person stops sharing from the browser's own "Stop sharing"
+      // bar, the audio track ends too — fall back to the mic automatically.
+      screenAudioTrack.onended = ()=>{ if(isScreenSharing) stopScreenShare(); };
+    }
     if(localVideoEl) localVideoEl.srcObject = screenStream;
     isScreenSharing = true;
     bubbleEl.querySelector('#cc-toggle-share').classList.add('cc-ctrl-active');
@@ -542,6 +712,10 @@
     if(pc && cameraTrack){
       const sender = pc.getSenders().find(s=> s.track && s.track.kind === 'video');
       if(sender) await sender.replaceTrack(cameraTrack).catch(()=>{});
+    }
+    if(pc && micTrack){
+      const audioSender = pc.getSenders().find(s=> s.track && s.track.kind === 'audio');
+      if(audioSender) await audioSender.replaceTrack(micTrack).catch(()=>{});
     }
     if(localVideoEl) localVideoEl.srcObject = localStream;
     if(bubbleEl){
@@ -722,6 +896,7 @@
     fabBtn.classList.remove('hidden');
     watchPresence();
     watchIncoming();
+    watchCallHistory();
   }
 
   // Start a call directly by id/name — used by any UI that already knows who
@@ -737,6 +912,9 @@
     stopRinging();
     if(unsubPresence){ unsubPresence(); unsubPresence = null; }
     if(unsubIncoming){ unsubIncoming(); unsubIncoming = null; }
+    if(unsubHistoryOut){ unsubHistoryOut(); unsubHistoryOut = null; }
+    if(unsubHistoryIn){ unsubHistoryIn(); unsubHistoryIn = null; }
+    historyOut = []; historyIn = [];
     if(callDocRef || pc) endCall('ended');
     others = [];
     if(fabBtn) fabBtn.classList.add('hidden');

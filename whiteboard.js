@@ -45,6 +45,12 @@
   }
   function boardsCol(){ return db.collection('classes').doc(ctx.classId).collection('whiteboards'); }
   function strokesCol(boardId){ return boardsCol().doc(boardId).collection('strokes'); }
+  function cursorsCol(boardId){ return boardsCol().doc(boardId).collection('cursors'); }
+  function colorForUser(userId){
+    let hash = 0;
+    for(let i=0;i<userId.length;i++) hash = (hash*31 + userId.charCodeAt(i)) >>> 0;
+    return CURSOR_COLORS[hash % CURSOR_COLORS.length];
+  }
 
   /* --------------------------- board list (review) --------------------------- */
   function mountPage(container){
@@ -146,6 +152,20 @@
   let currentColor = COLORS[0];
   let currentSize = SIZES[1].px;
   let currentTool = 'pen'; // 'pen' | 'eraser'
+  let myStrokeStack = [];   // ids of strokes *I* drew on the current board, in order — powers Undo
+  let undoBtn = null;
+  let keydownHandler = null;
+
+  // ------- live cursor presence -------
+  const CURSOR_COLORS = ['#C1502E', '#2B6CB0', '#B87A1F', '#6B3FA0', '#3B6D40', '#B8336A'];
+  const CURSOR_WRITE_MS = 70;    // how often we broadcast our own pointer position
+  const CURSOR_STALE_MS = 8000;  // hide a cursor if its owner stopped updating it (closed tab, etc.)
+  let unsubCursors = null;
+  let cursorCache = {};          // userId -> { name, x, y, color, updatedAt }
+  let cursorEls = {};            // userId -> DOM node
+  let cursorLayerEl = null;
+  let lastCursorWrite = 0;
+  let cursorSweepTimer = null;
 
   function buildEditor(container, boardId, opts){
     teardownEditor();
@@ -161,6 +181,8 @@
             <div class="wb-swatches">${colorSwatches}</div>
             <div class="wb-sizes">${sizeButtons}</div>
             <button class="btn small" id="wb-eraser">\u{1F9FD} Eraser</button>
+            <button class="btn small" id="wb-undo" title="Undo your last stroke (Ctrl/Cmd+Z)">\u21B6 Undo</button>
+            <button class="btn small" id="wb-export" title="Download this board as an image">\u2B07 PNG</button>
             <button class="btn small danger" id="wb-clear">Clear</button>
             ${opts.onCloseOverlay ? `<button class="btn small" id="wb-overlay-close">Close</button>` : ''}
           </div>
@@ -168,6 +190,7 @@
         <div class="wb-canvas-wrap">
           <canvas id="wb-bg" class="wb-canvas"></canvas>
           <canvas id="wb-live" class="wb-canvas wb-canvas-live"></canvas>
+          <div id="wb-cursor-layer" class="wb-cursor-layer"></div>
         </div>
       </div>`;
 
@@ -178,6 +201,7 @@
     bgCtx = bgCanvas.getContext('2d');
     liveCtx = liveCanvas.getContext('2d');
     bgCtx.fillStyle = '#FFFFFF'; bgCtx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+    cursorLayerEl = container.querySelector('#wb-cursor-layer');
 
     container.querySelectorAll('[data-color]').forEach(b=>{
       b.classList.toggle('wb-swatch-active', b.dataset.color === currentColor);
@@ -191,9 +215,22 @@
     eraserBtn.onclick = ()=>{ currentTool = currentTool === 'eraser' ? 'pen' : 'eraser'; syncToolButtons(container); };
     syncToolButtons(container);
 
+    myStrokeStack = [];
+    undoBtn = container.querySelector('#wb-undo');
+    undoBtn.disabled = true;
+    undoBtn.onclick = undoLastStroke;
+    container.querySelector('#wb-export').onclick = ()=> exportBoardAsPng(container.querySelector('#wb-title'));
+    keydownHandler = e=>{
+      const cmd = e.metaKey || e.ctrlKey;
+      if(cmd && e.key.toLowerCase() === 'z'){ e.preventDefault(); undoLastStroke(); }
+    };
+    document.addEventListener('keydown', keydownHandler);
+
     container.querySelector('#wb-clear').onclick = async ()=>{
       if(!confirm('Clear this whole board for everyone?')) return;
       strokeCache = {};
+      myStrokeStack = [];
+      updateUndoButton();
       redraw();
       await deleteAllStrokes(boardId);
       boardsCol().doc(boardId).update({ updatedAt: firebase.firestore.FieldValue.serverTimestamp() }).catch(()=>{});
@@ -215,6 +252,7 @@
 
     wirePointerEvents(liveCanvas);
     watchStrokes(boardId);
+    watchCursors(boardId);
   }
 
   function syncToolButtons(container){
@@ -297,9 +335,11 @@
       startStroke(canvasPoint(e));
     });
     canvas.addEventListener('pointermove', e=>{
-      if(!currentStrokeId) return;
-      extendStroke(canvasPoint(e));
+      const pt = canvasPoint(e);
+      if(currentStrokeId) extendStroke(pt);
+      broadcastCursor(pt);
     });
+    canvas.addEventListener('pointerleave', ()=> clearMyCursor());
     ['pointerup','pointercancel','pointerleave'].forEach(evt=>{
       canvas.addEventListener(evt, ()=>{ if(currentStrokeId) endStroke(); });
     });
@@ -316,6 +356,8 @@
       points: [pt], createdBy: ctx.myId, createdByName: ctx.myName,
       createdAt: firebase.firestore.FieldValue.serverTimestamp(), done: false
     }).catch(()=>{});
+    myStrokeStack.push(currentStrokeId);
+    updateUndoButton();
     flushTimer = setInterval(flushPending, FLUSH_MS);
   }
 
@@ -365,12 +407,118 @@
     pendingFlush = [];
   }
 
+  // Draws the live in-progress stroke on top of the committed background so
+  // nothing mid-draw gets lost, then downloads the flattened result as a PNG.
+  function exportBoardAsPng(titleEl){
+    if(!bgCanvas) return;
+    const out = document.createElement('canvas');
+    out.width = CANVAS_W; out.height = CANVAS_H;
+    const outCtx = out.getContext('2d');
+    outCtx.drawImage(bgCanvas, 0, 0);
+    if(liveCanvas) outCtx.drawImage(liveCanvas, 0, 0);
+    const rawTitle = (titleEl && titleEl.textContent) ? titleEl.textContent.trim() : 'whiteboard';
+    const safeName = rawTitle.replace(/[^a-z0-9\-_ ]/gi, '').trim().replace(/\s+/g, '-').slice(0, 60) || 'whiteboard';
+    const link = document.createElement('a');
+    link.href = out.toDataURL('image/png');
+    link.download = `${safeName}.png`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  }
+
+  function updateUndoButton(){
+    if(undoBtn) undoBtn.disabled = myStrokeStack.length === 0;
+  }
+
+  // Removes only *my own* most recent stroke — never someone else's — so
+  // undo can't be used to erase a classmate's work by mistake.
+  async function undoLastStroke(){
+    if(myStrokeStack.length === 0 || !activeBoardId) return;
+    const id = myStrokeStack.pop();
+    updateUndoButton();
+    delete strokeCache[id];
+    redraw();
+    await strokesCol(activeBoardId).doc(id).delete().catch(()=>{});
+    boardsCol().doc(activeBoardId).update({ updatedAt: firebase.firestore.FieldValue.serverTimestamp() }).catch(()=>{});
+  }
+
+  /* --------------------------- live cursor presence --------------------------- */
+  // Broadcast my pointer position (throttled) so everyone sees a small
+  // labeled dot tracking where I'm about to draw — a lightweight
+  // single-doc-per-user write, cheap even at ~14 updates/sec.
+  function broadcastCursor(pt){
+    if(!activeBoardId) return;
+    const now = Date.now();
+    if(now - lastCursorWrite < CURSOR_WRITE_MS) return;
+    lastCursorWrite = now;
+    cursorsCol(activeBoardId).doc(ctx.myId).set({
+      name: ctx.myName, x: pt.x, y: pt.y, color: colorForUser(ctx.myId),
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+    }).catch(()=>{});
+  }
+
+  function clearMyCursor(){
+    if(!activeBoardId) return;
+    cursorsCol(activeBoardId).doc(ctx.myId).delete().catch(()=>{});
+  }
+
+  function watchCursors(boardId){
+    cursorCache = {};
+    unsubCursors = cursorsCol(boardId).onSnapshot(snap=>{
+      snap.docChanges().forEach(change=>{
+        if(change.doc.id === ctx.myId) return; // never render my own cursor
+        if(change.type === 'removed'){ delete cursorCache[change.doc.id]; return; }
+        cursorCache[change.doc.id] = { id: change.doc.id, ...change.doc.data() };
+      });
+      renderCursors();
+    }, ()=>{});
+    cursorSweepTimer = setInterval(()=>{
+      const now = Date.now();
+      let changed = false;
+      Object.keys(cursorCache).forEach(id=>{
+        if(now - tsVal(cursorCache[id].updatedAt) > CURSOR_STALE_MS){ delete cursorCache[id]; changed = true; }
+      });
+      if(changed) renderCursors();
+    }, 3000);
+  }
+
+  function renderCursors(){
+    if(!cursorLayerEl) return;
+    const seen = new Set();
+    Object.values(cursorCache).forEach(c=>{
+      seen.add(c.id);
+      let node = cursorEls[c.id];
+      if(!node){
+        node = el(`<div class="wb-cursor"><div class="wb-cursor-dot"></div><div class="wb-cursor-label"></div></div>`);
+        cursorLayerEl.appendChild(node);
+        cursorEls[c.id] = node;
+      }
+      node.style.left = `${(c.x / CANVAS_W) * 100}%`;
+      node.style.top = `${(c.y / CANVAS_H) * 100}%`;
+      node.querySelector('.wb-cursor-dot').style.background = c.color || '#1F3A2E';
+      node.querySelector('.wb-cursor-label').textContent = c.name || 'Someone';
+      node.querySelector('.wb-cursor-label').style.background = c.color || '#1F3A2E';
+    });
+    Object.keys(cursorEls).forEach(id=>{
+      if(!seen.has(id)){ cursorEls[id].remove(); delete cursorEls[id]; }
+    });
+  }
+
   function teardownEditor(){
     if(unsubStrokes){ unsubStrokes(); unsubStrokes = null; }
+    if(unsubCursors){ unsubCursors(); unsubCursors = null; }
+    if(cursorSweepTimer){ clearInterval(cursorSweepTimer); cursorSweepTimer = null; }
     if(flushTimer){ clearInterval(flushTimer); flushTimer = null; }
+    if(keydownHandler){ document.removeEventListener('keydown', keydownHandler); keydownHandler = null; }
+    clearMyCursor();
     activeBoardId = null;
     strokeCache = {};
+    cursorCache = {};
+    cursorEls = {};
+    cursorLayerEl = null;
     currentStrokeId = null;
+    myStrokeStack = [];
+    undoBtn = null;
     bgCanvas = liveCanvas = bgCtx = liveCtx = null;
   }
 
