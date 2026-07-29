@@ -686,15 +686,20 @@
     const sender = pc.getSenders().find(s=> s.track && s.track.kind === 'video');
     if(sender) await sender.replaceTrack(screenTrack);
     // Not every share source has audio to capture (e.g. sharing a window, or
-    // "Entire Screen" on some OSes) — only swap the outgoing audio if the
-    // picker actually gave us a track.
+    // "Entire Screen" on some OSes, or "Chrome Tab" without the "Share tab
+    // audio" checkbox ticked) — only swap the outgoing audio if the picker
+    // actually gave us a track, and always tell the sharer which happened so
+    // they're not left guessing why the other person can't hear anything.
     const screenAudioTrack = screenStream.getAudioTracks()[0];
     if(screenAudioTrack){
       const audioSender = pc.getSenders().find(s=> s.track && s.track.kind === 'audio');
       if(audioSender) await audioSender.replaceTrack(screenAudioTrack);
+      showStatus('Sharing screen with audio — they can hear it too');
       // If the person stops sharing from the browser's own "Stop sharing"
       // bar, the audio track ends too — fall back to the mic automatically.
       screenAudioTrack.onended = ()=>{ if(isScreenSharing) stopScreenShare(); };
+    }else{
+      showStatus("Sharing screen — no audio captured, they'll only hear your mic. Re-share and check \u201CShare tab audio\u201D to include sound.");
     }
     if(localVideoEl) localVideoEl.srcObject = screenStream;
     isScreenSharing = true;
