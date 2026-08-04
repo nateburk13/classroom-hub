@@ -349,7 +349,12 @@ button.btn:disabled{opacity:0.4;cursor:not-allowed;}
 .wb-title{font-family:'Roboto Slab',serif;font-weight:700;font-size:15px;cursor:pointer;padding:4px 8px;border-radius:6px;}
 .wb-title:hover{background:var(--cream);}
 .wb-tools{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-left:auto;}
-.wb-shape-tools{display:flex;gap:6px;}
+.wb-shape-tools{display:flex;gap:6px;position:relative;}
+.wb-symbol-wrap{position:relative;}
+.wb-symbol-panel{position:absolute;top:calc(100% + 6px);left:0;z-index:20;background:var(--paper);border:0.5px solid var(--line);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,0.15);padding:8px;display:grid;grid-template-columns:repeat(4,32px);gap:4px;width:max-content;}
+.wb-symbol-panel.hidden{display:none;}
+.wb-symbol-btn{width:32px;height:32px;border-radius:6px;border:0.5px solid var(--line);background:var(--cream);font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;}
+.wb-symbol-btn:hover{background:var(--amber);}
 .wb-swatches{display:flex;gap:5px;}
 .wb-swatch{width:22px;height:22px;border-radius:50%;border:2px solid transparent;cursor:pointer;padding:0;}
 .wb-swatch-active{border-color:var(--forest);box-shadow:0 0 0 2px var(--amber);}

@@ -29,6 +29,8 @@
   const CANVAS_W = 1600, CANVAS_H = 900; // fixed logical drawing surface (16:9)
   const COLORS = ['#1F3A2E', '#C1502E', '#2B6CB0', '#B87A1F', '#6B3FA0', '#FFFFFF'];
   const SIZES = [{ label: 'S', px: 3 }, { label: 'M', px: 7 }, { label: 'L', px: 14 }];
+  // Quick-insert symbol palette — click one, then click the board to stamp it.
+  const SYMBOLS = ['\u2605','\u2764','\u2713','\u2717','\u2757','\u2753','\u27A1','\u2B06','\u2B07','\u25B2','\u25CF','\u25A0','\u2603','\u2600','\u26A1','\u2699'];
 
   let ctx = null; // { classId, myId, myName, myRole }
 
@@ -151,12 +153,14 @@
   let flushTimer = null;
   let currentColor = COLORS[0];
   let currentSize = SIZES[1].px;
-  let currentTool = 'pen'; // 'pen' | 'eraser' | 'text' | 'line' | 'rect' | 'circle'
+  let currentTool = 'pen'; // 'pen' | 'eraser' | 'text' | 'symbol' | 'line' | 'rect' | 'circle'
+  let currentSymbol = SYMBOLS[0];
   const SHAPE_TOOLS = ['line', 'rect', 'circle'];
   let shapeStartPt = null;   // start point while dragging out a shape
   let myStrokeStack = [];   // ids of strokes *I* drew on the current board, in order — powers Undo
   let undoBtn = null;
   let keydownHandler = null;
+  let symbolPanelOutsideHandler = null;
 
   // ------- live cursor presence -------
   const CURSOR_COLORS = ['#C1502E', '#2B6CB0', '#B87A1F', '#6B3FA0', '#3B6D40', '#B8336A'];
@@ -188,6 +192,12 @@
               <button class="btn small" id="wb-line" data-tool="line" title="Draw a straight line">\u2571 Line</button>
               <button class="btn small" id="wb-rect" data-tool="rect" title="Draw a rectangle">\u25AD Rect</button>
               <button class="btn small" id="wb-circle" data-tool="circle" title="Draw a circle">\u25EF Circle</button>
+              <div class="wb-symbol-wrap">
+                <button class="btn small" id="wb-symbols-toggle" title="Insert a symbol">\u2733 Symbols</button>
+                <div class="wb-symbol-panel hidden" id="wb-symbol-panel">
+                  ${SYMBOLS.map(s=> `<button class="wb-symbol-btn" data-symbol="${s}">${s}</button>`).join('')}
+                </div>
+              </div>
             </div>
             <button class="btn small" id="wb-undo" title="Undo your last stroke (Ctrl/Cmd+Z)">\u21B6 Undo</button>
             <button class="btn small" id="wb-export" title="Download this board as an image">\u2B07 PNG</button>
@@ -225,9 +235,28 @@
         currentTool = currentTool === tool ? 'pen' : tool;
         shapeStartPt = null;
         if(liveCtx) liveCtx.clearRect(0, 0, CANVAS_W, CANVAS_H);
+        closeSymbolPanel(container);
         syncToolButtons(container);
       };
     });
+    const symbolToggle = container.querySelector('#wb-symbols-toggle');
+    const symbolPanel = container.querySelector('#wb-symbol-panel');
+    if(symbolToggle && symbolPanel){
+      symbolToggle.onclick = (e)=>{ e.stopPropagation(); symbolPanel.classList.toggle('hidden'); };
+      symbolPanel.querySelectorAll('[data-symbol]').forEach(b=>{
+        b.onclick = ()=>{
+          currentSymbol = b.dataset.symbol;
+          currentTool = 'symbol';
+          shapeStartPt = null;
+          if(liveCtx) liveCtx.clearRect(0, 0, CANVAS_W, CANVAS_H);
+          closeSymbolPanel(container);
+          syncToolButtons(container);
+        };
+      });
+      document.removeEventListener('click', symbolPanelOutsideHandler);
+      symbolPanelOutsideHandler = (e)=>{ if(!symbolToggle.contains(e.target) && !symbolPanel.contains(e.target)) closeSymbolPanel(container); };
+      document.addEventListener('click', symbolPanelOutsideHandler);
+    }
     syncToolButtons(container);
 
     myStrokeStack = [];
@@ -275,6 +304,13 @@
     container.querySelectorAll('[data-color]').forEach(b=> b.classList.toggle('wb-swatch-active', b.dataset.color === currentColor && usesColor));
     container.querySelectorAll('[data-size]').forEach(b=> b.classList.toggle('wb-size-active', Number(b.dataset.size) === currentSize));
     container.querySelectorAll('[data-tool]').forEach(b=> b.classList.toggle('cc-ctrl-active', b.dataset.tool === currentTool));
+    const symbolToggle = container.querySelector('#wb-symbols-toggle');
+    if(symbolToggle) symbolToggle.classList.toggle('cc-ctrl-active', currentTool === 'symbol');
+  }
+
+  function closeSymbolPanel(container){
+    const panel = container.querySelector('#wb-symbol-panel');
+    if(panel) panel.classList.add('hidden');
   }
 
   function watchStrokes(boardId){
@@ -310,7 +346,7 @@
 
   // Dispatches a stored item to the right drawing routine based on its tool.
   function renderItem(targetCtx, s){
-    if(s.tool === 'text') drawText(targetCtx, s.point, s.text, s.color, s.size);
+    if(s.tool === 'text') drawText(targetCtx, s.point, s.text, s.color, s.size, !!s.center);
     else if(SHAPE_TOOLS.includes(s.tool)) drawShape(targetCtx, s.tool, s.start, s.end, s.color, s.size);
     else drawStroke(targetCtx, s.points || [], s.color, s.size, s.tool);
   }
@@ -347,12 +383,18 @@
     return Math.round((size || SIZES[1].px) * 4.5) + 12;
   }
 
-  function drawText(targetCtx, point, text, color, size){
+  function drawText(targetCtx, point, text, color, size, centered){
     if(!point || !text) return;
     targetCtx.save();
     targetCtx.fillStyle = color || '#1F3A2E';
     targetCtx.font = `600 ${fontPxForSize(size)}px 'Inter', sans-serif`;
-    targetCtx.textBaseline = 'top';
+    if(centered){
+      targetCtx.textAlign = 'center';
+      targetCtx.textBaseline = 'middle';
+    }else{
+      targetCtx.textAlign = 'left';
+      targetCtx.textBaseline = 'top';
+    }
     targetCtx.fillText(text, point.x, point.y);
     targetCtx.restore();
   }
@@ -411,6 +453,7 @@
 
   function startStroke(pt){
     if(currentTool === 'text'){ addTextAt(pt); return; }
+    if(currentTool === 'symbol'){ addSymbolAt(pt); return; }
     if(SHAPE_TOOLS.includes(currentTool)){
       shapeStartPt = pt;
       currentStrokeId = `${ctx.myId}-${Date.now()}-${Math.floor(Math.random()*1000)}`;
@@ -447,6 +490,20 @@
     myStrokeStack.push(id);
     updateUndoButton();
     // Fold in locally for an instant, gap-free appearance.
+    strokeCache[id] = { id, ...item, createdAt: { toMillis: ()=> Date.now() } };
+    redraw();
+  }
+
+  function addSymbolAt(pt){
+    const id = `${ctx.myId}-${Date.now()}-${Math.floor(Math.random()*1000)}`;
+    const item = {
+      tool: 'text', point: pt, text: currentSymbol, color: currentColor, size: currentSize, center: true,
+      createdBy: ctx.myId, createdByName: ctx.myName,
+      createdAt: firebase.firestore.FieldValue.serverTimestamp(), done: true
+    };
+    strokesCol(activeBoardId).doc(id).set(item).catch(()=>{});
+    myStrokeStack.push(id);
+    updateUndoButton();
     strokeCache[id] = { id, ...item, createdAt: { toMillis: ()=> Date.now() } };
     redraw();
   }
@@ -628,6 +685,7 @@
     if(cursorSweepTimer){ clearInterval(cursorSweepTimer); cursorSweepTimer = null; }
     if(flushTimer){ clearInterval(flushTimer); flushTimer = null; }
     if(keydownHandler){ document.removeEventListener('keydown', keydownHandler); keydownHandler = null; }
+    if(symbolPanelOutsideHandler){ document.removeEventListener('click', symbolPanelOutsideHandler); symbolPanelOutsideHandler = null; }
     clearMyCursor();
     activeBoardId = null;
     strokeCache = {};
