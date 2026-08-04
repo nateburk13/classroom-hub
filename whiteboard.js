@@ -29,8 +29,32 @@
   const CANVAS_W = 1600, CANVAS_H = 900; // fixed logical drawing surface (16:9)
   const COLORS = ['#1F3A2E', '#C1502E', '#2B6CB0', '#B87A1F', '#6B3FA0', '#FFFFFF'];
   const SIZES = [{ label: 'S', px: 3 }, { label: 'M', px: 7 }, { label: 'L', px: 14 }];
-  // Quick-insert symbol palette — click one, then click the board to stamp it.
-  const SYMBOLS = ['\u2605','\u2764','\u2713','\u2717','\u2757','\u2753','\u27A1','\u2B06','\u2B07','\u25B2','\u25CF','\u25A0','\u2603','\u2600','\u26A1','\u2699'];
+  // Shapes dropdown — click a shape, then drag on the board to draw it.
+  const SHAPE_DEFS = [
+    { tool: 'line',     label: 'Line',      icon: '\u2571' },
+    { tool: 'arrow',    label: 'Arrow',     icon: '\u2192' },
+    { tool: 'rect',     label: 'Rectangle', icon: '\u25AD' },
+    { tool: 'circle',   label: 'Circle',    icon: '\u25EF' },
+    { tool: 'triangle', label: 'Triangle',  icon: '\u25B3' }
+  ];
+  const SHAPE_TOOLS = SHAPE_DEFS.map(s=> s.tool);
+  // Text dropdown — font choices are limited to fonts this app already
+  // loads via Google Fonts (see teacher.html / student.html <head>).
+  const FONT_FAMILIES = [
+    { label: 'Sans',  value: "'Inter', sans-serif" },
+    { label: 'Serif', value: "'Roboto Slab', serif" },
+    { label: 'Mono',  value: "'JetBrains Mono', monospace" }
+  ];
+  const FONT_SIZES = [16, 20, 24, 32, 40, 56, 72];
+  // Symbols dropdown — click one, then click the board to stamp it (stays
+  // selected so you can stamp several in a row).
+  const SYMBOL_GROUPS = [
+    { label: 'Marks',  items: ['\u2605','\u2606','\u2764','\u2713','\u2717','\u2757','\u2753','\u203C'] },
+    { label: 'Arrows', items: ['\u2191','\u2193','\u2190','\u2192','\u2196','\u2197','\u2198','\u2199'] },
+    { label: 'Shapes', items: ['\u25CF','\u25CB','\u25A0','\u25A1','\u25B2','\u25B3','\u25C6','\u25C7'] },
+    { label: 'Math',   items: ['+','\u2212','\u00D7','\u00F7','=','\u2260','%','\u00B0'] },
+    { label: 'Misc',   items: ['\u2600','\u2601','\u2602','\u2603','\u26A1','\u2699','\u266A','\u263A'] }
+  ];
 
   let ctx = null; // { classId, myId, myName, myRole }
 
@@ -153,9 +177,12 @@
   let flushTimer = null;
   let currentColor = COLORS[0];
   let currentSize = SIZES[1].px;
-  let currentTool = 'pen'; // 'pen' | 'eraser' | 'text' | 'symbol' | 'line' | 'rect' | 'circle'
-  let currentSymbol = SYMBOLS[0];
-  const SHAPE_TOOLS = ['line', 'rect', 'circle'];
+  let currentTool = 'pen'; // 'pen' | 'eraser' | 'text' | 'symbol' | shape tool name
+  let currentSymbol = SYMBOL_GROUPS[0].items[0];
+  let currentFontFamily = FONT_FAMILIES[0].value;
+  let currentFontSize = 32;
+  let currentBold = false;
+  let currentItalic = false;
   let shapeStartPt = null;   // start point while dragging out a shape
   let myStrokeStack = [];   // ids of strokes *I* drew on the current board, in order — powers Undo
   let undoBtn = null;
@@ -178,6 +205,10 @@
     activeBoardId = boardId;
     const colorSwatches = COLORS.map(c=> `<button class="wb-swatch" data-color="${c}" style="background:${c};${c==='#FFFFFF'?'border-color:var(--line);':''}" aria-label="Color ${c}"></button>`).join('');
     const sizeButtons = SIZES.map(s=> `<button class="wb-size-btn" data-size="${s.px}">${s.label}</button>`).join('');
+    const shapeItems = SHAPE_DEFS.map(s=> `<button class="wb-dropdown-item" data-tool="${s.tool}" title="${esc(s.label)}"><span class="wb-dropdown-item-icon">${s.icon}</span><span>${esc(s.label)}</span></button>`).join('');
+    const fontOptions = FONT_FAMILIES.map(f=> `<option value="${esc(f.value)}">${esc(f.label)}</option>`).join('');
+    const sizeOptions = FONT_SIZES.map(sz=> `<option value="${sz}">${sz}px</option>`).join('');
+    const symbolGroups = SYMBOL_GROUPS.map(g=> `<div class="wb-symbol-group-label">${esc(g.label)}</div><div class="wb-symbol-grid">${g.items.map(s=> `<button class="wb-symbol-btn" data-symbol="${s}">${s}</button>`).join('')}</div>`).join('');
     container.innerHTML = `
       <div class="wb-editor">
         <div class="wb-toolbar">
@@ -187,18 +218,32 @@
             <div class="wb-swatches">${colorSwatches}</div>
             <div class="wb-sizes">${sizeButtons}</div>
             <button class="btn small" id="wb-eraser" data-tool="eraser">\u{1F9FD} Eraser</button>
-            <div class="wb-shape-tools">
-              <button class="btn small" id="wb-text" data-tool="text" title="Add text">\u{1F524} Text</button>
-              <button class="btn small" id="wb-line" data-tool="line" title="Draw a straight line">\u2571 Line</button>
-              <button class="btn small" id="wb-rect" data-tool="rect" title="Draw a rectangle">\u25AD Rect</button>
-              <button class="btn small" id="wb-circle" data-tool="circle" title="Draw a circle">\u25EF Circle</button>
-              <div class="wb-symbol-wrap">
-                <button class="btn small" id="wb-symbols-toggle" title="Insert a symbol">\u2733 Symbols</button>
-                <div class="wb-symbol-panel hidden" id="wb-symbol-panel">
-                  ${SYMBOLS.map(s=> `<button class="wb-symbol-btn" data-symbol="${s}">${s}</button>`).join('')}
+
+            <div class="wb-dropdown-wrap">
+              <button class="btn small wb-dropdown-toggle" id="wb-shapes-toggle" title="Insert a shape">\u25AD Shapes \u25BE</button>
+              <div class="wb-dropdown-panel hidden" id="wb-shapes-panel">${shapeItems}</div>
+            </div>
+
+            <div class="wb-dropdown-wrap">
+              <button class="btn small wb-dropdown-toggle" id="wb-text-toggle" title="Add text">\u{1F524} Text \u25BE</button>
+              <div class="wb-dropdown-panel wb-text-panel hidden" id="wb-text-panel">
+                <label>Font</label>
+                <select id="wb-font-family">${fontOptions}</select>
+                <label>Size</label>
+                <select id="wb-font-size">${sizeOptions}</select>
+                <div class="wb-text-style-row">
+                  <button class="btn small" id="wb-bold-toggle" title="Bold"><b>B</b></button>
+                  <button class="btn small" id="wb-italic-toggle" title="Italic"><i>I</i></button>
                 </div>
+                <p class="wb-dropdown-hint">Click the board to place text.</p>
               </div>
             </div>
+
+            <div class="wb-dropdown-wrap">
+              <button class="btn small wb-dropdown-toggle" id="wb-symbols-toggle" title="Insert a symbol">\u2733 Symbols \u25BE</button>
+              <div class="wb-dropdown-panel wb-symbol-panel hidden" id="wb-symbol-panel">${symbolGroups}</div>
+            </div>
+
             <button class="btn small" id="wb-undo" title="Undo your last stroke (Ctrl/Cmd+Z)">\u21B6 Undo</button>
             <button class="btn small" id="wb-export" title="Download this board as an image">\u2B07 PNG</button>
             <button class="btn small danger" id="wb-clear">Clear</button>
@@ -235,28 +280,70 @@
         currentTool = currentTool === tool ? 'pen' : tool;
         shapeStartPt = null;
         if(liveCtx) liveCtx.clearRect(0, 0, CANVAS_W, CANVAS_H);
-        closeSymbolPanel(container);
+        closeAllDropdowns(container);
         syncToolButtons(container);
       };
     });
+
+    // ---- Shapes dropdown: just opens/closes; picking an item (above) sets the tool ----
+    const shapesToggle = container.querySelector('#wb-shapes-toggle');
+    const shapesPanel = container.querySelector('#wb-shapes-panel');
+    if(shapesToggle && shapesPanel){
+      shapesToggle.onclick = (e)=>{ e.stopPropagation(); const willOpen = shapesPanel.classList.contains('hidden'); closeAllDropdowns(container); if(willOpen) shapesPanel.classList.remove('hidden'); };
+    }
+
+    // ---- Text dropdown: the toggle both selects the text tool AND opens
+    // the panel so font/size/bold/italic can be adjusted before placing. ----
+    const textToggle = container.querySelector('#wb-text-toggle');
+    const textPanel = container.querySelector('#wb-text-panel');
+    if(textToggle && textPanel){
+      textToggle.onclick = (e)=>{
+        e.stopPropagation();
+        const willOpen = textPanel.classList.contains('hidden');
+        currentTool = 'text';
+        shapeStartPt = null;
+        if(liveCtx) liveCtx.clearRect(0, 0, CANVAS_W, CANVAS_H);
+        closeAllDropdowns(container);
+        if(willOpen) textPanel.classList.remove('hidden');
+        syncToolButtons(container);
+      };
+      const fontSelect = container.querySelector('#wb-font-family');
+      const sizeSelect = container.querySelector('#wb-font-size');
+      const boldBtn = container.querySelector('#wb-bold-toggle');
+      const italicBtn = container.querySelector('#wb-italic-toggle');
+      fontSelect.value = currentFontFamily;
+      sizeSelect.value = String(currentFontSize);
+      boldBtn.classList.toggle('cc-ctrl-active', currentBold);
+      italicBtn.classList.toggle('cc-ctrl-active', currentItalic);
+      fontSelect.onchange = ()=>{ currentFontFamily = fontSelect.value; };
+      sizeSelect.onchange = ()=>{ currentFontSize = Number(sizeSelect.value); };
+      boldBtn.onclick = (e)=>{ e.stopPropagation(); currentBold = !currentBold; boldBtn.classList.toggle('cc-ctrl-active', currentBold); };
+      italicBtn.onclick = (e)=>{ e.stopPropagation(); currentItalic = !currentItalic; italicBtn.classList.toggle('cc-ctrl-active', currentItalic); };
+      textPanel.onclick = (e)=> e.stopPropagation(); // keep panel open while adjusting controls
+    }
+
+    // ---- Symbols dropdown ----
     const symbolToggle = container.querySelector('#wb-symbols-toggle');
     const symbolPanel = container.querySelector('#wb-symbol-panel');
     if(symbolToggle && symbolPanel){
-      symbolToggle.onclick = (e)=>{ e.stopPropagation(); symbolPanel.classList.toggle('hidden'); };
+      symbolToggle.onclick = (e)=>{ e.stopPropagation(); const willOpen = symbolPanel.classList.contains('hidden'); closeAllDropdowns(container); if(willOpen) symbolPanel.classList.remove('hidden'); };
       symbolPanel.querySelectorAll('[data-symbol]').forEach(b=>{
         b.onclick = ()=>{
           currentSymbol = b.dataset.symbol;
           currentTool = 'symbol';
           shapeStartPt = null;
           if(liveCtx) liveCtx.clearRect(0, 0, CANVAS_W, CANVAS_H);
-          closeSymbolPanel(container);
+          closeAllDropdowns(container);
           syncToolButtons(container);
         };
       });
-      document.removeEventListener('click', symbolPanelOutsideHandler);
-      symbolPanelOutsideHandler = (e)=>{ if(!symbolToggle.contains(e.target) && !symbolPanel.contains(e.target)) closeSymbolPanel(container); };
-      document.addEventListener('click', symbolPanelOutsideHandler);
     }
+    document.removeEventListener('click', symbolPanelOutsideHandler);
+    symbolPanelOutsideHandler = (e)=>{
+      if(container.contains(e.target) && e.target.closest('.wb-dropdown-wrap')) return;
+      closeAllDropdowns(container);
+    };
+    document.addEventListener('click', symbolPanelOutsideHandler);
     syncToolButtons(container);
 
     myStrokeStack = [];
@@ -304,13 +391,16 @@
     container.querySelectorAll('[data-color]').forEach(b=> b.classList.toggle('wb-swatch-active', b.dataset.color === currentColor && usesColor));
     container.querySelectorAll('[data-size]').forEach(b=> b.classList.toggle('wb-size-active', Number(b.dataset.size) === currentSize));
     container.querySelectorAll('[data-tool]').forEach(b=> b.classList.toggle('cc-ctrl-active', b.dataset.tool === currentTool));
+    const shapesToggle = container.querySelector('#wb-shapes-toggle');
+    if(shapesToggle) shapesToggle.classList.toggle('cc-ctrl-active', SHAPE_TOOLS.includes(currentTool));
+    const textToggle = container.querySelector('#wb-text-toggle');
+    if(textToggle) textToggle.classList.toggle('cc-ctrl-active', currentTool === 'text');
     const symbolToggle = container.querySelector('#wb-symbols-toggle');
     if(symbolToggle) symbolToggle.classList.toggle('cc-ctrl-active', currentTool === 'symbol');
   }
 
-  function closeSymbolPanel(container){
-    const panel = container.querySelector('#wb-symbol-panel');
-    if(panel) panel.classList.add('hidden');
+  function closeAllDropdowns(container){
+    container.querySelectorAll('.wb-dropdown-panel').forEach(p=> p.classList.add('hidden'));
   }
 
   function watchStrokes(boardId){
@@ -346,7 +436,13 @@
 
   // Dispatches a stored item to the right drawing routine based on its tool.
   function renderItem(targetCtx, s){
-    if(s.tool === 'text') drawText(targetCtx, s.point, s.text, s.color, s.size, !!s.center);
+    if(s.tool === 'text'){
+      drawText(targetCtx, s.point, s.text, s.color, {
+        fontPx: s.fontPx || fontPxForSize(s.size),
+        fontFamily: s.fontFamily || FONT_FAMILIES[0].value,
+        bold: !!s.bold, italic: !!s.italic, centered: !!s.center
+      });
+    }
     else if(SHAPE_TOOLS.includes(s.tool)) drawShape(targetCtx, s.tool, s.start, s.end, s.color, s.size);
     else drawStroke(targetCtx, s.points || [], s.color, s.size, s.tool);
   }
@@ -355,6 +451,7 @@
     if(!start || !end) return;
     targetCtx.save();
     targetCtx.strokeStyle = color || '#1F3A2E';
+    targetCtx.fillStyle = color || '#1F3A2E';
     targetCtx.lineWidth = size || 5;
     targetCtx.lineCap = 'round';
     targetCtx.lineJoin = 'round';
@@ -363,6 +460,19 @@
       targetCtx.moveTo(start.x, start.y);
       targetCtx.lineTo(end.x, end.y);
       targetCtx.stroke();
+    }else if(tool === 'arrow'){
+      const angle = Math.atan2(end.y - start.y, end.x - start.x);
+      const headLen = Math.max(14, (size || 5) * 3.2);
+      targetCtx.beginPath();
+      targetCtx.moveTo(start.x, start.y);
+      targetCtx.lineTo(end.x, end.y);
+      targetCtx.stroke();
+      targetCtx.beginPath();
+      targetCtx.moveTo(end.x, end.y);
+      targetCtx.lineTo(end.x - headLen * Math.cos(angle - Math.PI / 7), end.y - headLen * Math.sin(angle - Math.PI / 7));
+      targetCtx.lineTo(end.x - headLen * Math.cos(angle + Math.PI / 7), end.y - headLen * Math.sin(angle + Math.PI / 7));
+      targetCtx.closePath();
+      targetCtx.fill();
     }else if(tool === 'rect'){
       const x = Math.min(start.x, end.x), y = Math.min(start.y, end.y);
       const w = Math.abs(end.x - start.x), h = Math.abs(end.y - start.y);
@@ -373,22 +483,36 @@
       targetCtx.beginPath();
       targetCtx.ellipse(cx, cy, Math.max(rx, 1), Math.max(ry, 1), 0, 0, Math.PI * 2);
       targetCtx.stroke();
+    }else if(tool === 'triangle'){
+      const x = Math.min(start.x, end.x), y = Math.min(start.y, end.y);
+      const w = Math.abs(end.x - start.x), h = Math.abs(end.y - start.y);
+      targetCtx.beginPath();
+      targetCtx.moveTo(x + w / 2, y);
+      targetCtx.lineTo(x + w, y + h);
+      targetCtx.lineTo(x, y + h);
+      targetCtx.closePath();
+      targetCtx.stroke();
     }
     targetCtx.restore();
   }
 
-  // Font size scales off the S/M/L stroke-size selector so text respects
-  // the same size control as the pen, rather than adding a separate control.
+  // Font size scales off the S/M/L stroke-size selector — used as a fallback
+  // for symbols and any older text items saved before per-item fontPx existed.
   function fontPxForSize(size){
     return Math.round((size || SIZES[1].px) * 4.5) + 12;
   }
 
-  function drawText(targetCtx, point, text, color, size, centered){
+  function drawText(targetCtx, point, text, color, opts){
     if(!point || !text) return;
+    opts = opts || {};
+    const fontPx = opts.fontPx || fontPxForSize();
+    const fontFamily = opts.fontFamily || FONT_FAMILIES[0].value;
+    const weight = opts.bold ? '700' : '600';
+    const style = opts.italic ? 'italic' : 'normal';
     targetCtx.save();
     targetCtx.fillStyle = color || '#1F3A2E';
-    targetCtx.font = `600 ${fontPxForSize(size)}px 'Inter', sans-serif`;
-    if(centered){
+    targetCtx.font = `${style} ${weight} ${fontPx}px ${fontFamily}`;
+    if(opts.centered){
       targetCtx.textAlign = 'center';
       targetCtx.textBaseline = 'middle';
     }else{
@@ -485,15 +609,19 @@
     if(text === null || !text.trim()) return;
     const id = `${ctx.myId}-${Date.now()}-${Math.floor(Math.random()*1000)}`;
     const item = {
-      tool: 'text', point: pt, text: text.trim(), color: currentColor, size: currentSize,
+      tool: 'text', point: pt, text: text.trim(), color: currentColor,
+      fontPx: currentFontSize, fontFamily: currentFontFamily, bold: currentBold, italic: currentItalic, center: false,
       createdBy: ctx.myId, createdByName: ctx.myName,
       createdAt: firebase.firestore.FieldValue.serverTimestamp(), done: true
     };
     strokesCol(activeBoardId).doc(id).set(item).catch(()=>{});
     myStrokeStack.push(id);
     updateUndoButton();
-    // Fold in locally for an instant, gap-free appearance.
-    strokeCache[id] = { id, ...item, createdAt: { toMillis: ()=> Date.now() } };
+    // Fold in locally for an instant, gap-free appearance. Capture a fixed
+    // timestamp now — an always-"live" one would re-sort this item on every
+    // redraw and could flip it behind other strokes (e.g. an eraser).
+    const nowMs = Date.now();
+    strokeCache[id] = { id, ...item, createdAt: { toMillis: ()=> nowMs } };
     redraw();
   }
 
@@ -507,7 +635,8 @@
     strokesCol(activeBoardId).doc(id).set(item).catch(()=>{});
     myStrokeStack.push(id);
     updateUndoButton();
-    strokeCache[id] = { id, ...item, createdAt: { toMillis: ()=> Date.now() } };
+    const nowMs = Date.now();
+    strokeCache[id] = { id, ...item, createdAt: { toMillis: ()=> nowMs } };
     redraw();
   }
 
@@ -559,7 +688,8 @@
       strokesCol(activeBoardId).doc(id).set(item).catch(()=>{});
       myStrokeStack.push(id);
       updateUndoButton();
-      strokeCache[id] = { id, ...item, createdAt: { toMillis: ()=> Date.now() } };
+      const shapeNowMs = Date.now();
+      strokeCache[id] = { id, ...item, createdAt: { toMillis: ()=> shapeNowMs } };
       redraw();
       currentStrokeId = null;
       currentStrokePoints = [];
@@ -573,10 +703,12 @@
     }
     // Fold the just-finished stroke into the local cache immediately so
     // there's no visible gap while we wait for our own snapshot echo back.
+    // Timestamp is captured once, not re-evaluated on every future redraw.
     if(currentStrokeId){
+      const penNowMs = Date.now();
       strokeCache[currentStrokeId] = {
         id: currentStrokeId, color: currentColor, size: currentSize, tool: currentTool,
-        points: currentStrokePoints, createdAt: { toMillis: ()=> Date.now() }
+        points: currentStrokePoints, createdAt: { toMillis: ()=> penNowMs }
       };
       redraw();
     }
