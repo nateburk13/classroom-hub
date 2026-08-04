@@ -464,7 +464,10 @@
     currentStrokePoints = [pt];
     pendingFlush = [pt];
     liveCtx.clearRect(0, 0, CANVAS_W, CANVAS_H);
-    drawDot(liveCtx, pt, currentColor, currentSize, currentTool);
+    // Eraser punches directly into the committed background layer so the
+    // removal is visible immediately, instead of waiting on a Firestore
+    // round-trip to redraw() — that round-trip is what made erasing feel slow.
+    drawDot(currentTool === 'eraser' ? bgCtx : liveCtx, pt, currentColor, currentSize, currentTool);
     strokesCol(activeBoardId).doc(currentStrokeId).set({
       color: currentColor, size: currentSize, tool: currentTool,
       points: [pt], createdBy: ctx.myId, createdByName: ctx.myName,
@@ -519,16 +522,17 @@
     const last = currentStrokePoints[currentStrokePoints.length - 1];
     currentStrokePoints.push(pt);
     pendingFlush.push(pt);
-    liveCtx.save();
-    liveCtx.globalCompositeOperation = currentTool === 'eraser' ? 'destination-out' : 'source-over';
-    liveCtx.strokeStyle = currentColor;
-    liveCtx.lineWidth = currentSize;
-    liveCtx.lineCap = 'round';
-    liveCtx.beginPath();
-    liveCtx.moveTo(last.x, last.y);
-    liveCtx.lineTo(pt.x, pt.y);
-    liveCtx.stroke();
-    liveCtx.restore();
+    const targetCtx = currentTool === 'eraser' ? bgCtx : liveCtx;
+    targetCtx.save();
+    targetCtx.globalCompositeOperation = currentTool === 'eraser' ? 'destination-out' : 'source-over';
+    targetCtx.strokeStyle = currentColor;
+    targetCtx.lineWidth = currentSize;
+    targetCtx.lineCap = 'round';
+    targetCtx.beginPath();
+    targetCtx.moveTo(last.x, last.y);
+    targetCtx.lineTo(pt.x, pt.y);
+    targetCtx.stroke();
+    targetCtx.restore();
   }
 
   function flushPending(){
