@@ -151,7 +151,9 @@
   let flushTimer = null;
   let currentColor = COLORS[0];
   let currentSize = SIZES[1].px;
-  let currentTool = 'pen'; // 'pen' | 'eraser'
+  let currentTool = 'pen'; // 'pen' | 'eraser' | 'text' | 'line' | 'rect' | 'circle'
+  const SHAPE_TOOLS = ['line', 'rect', 'circle'];
+  let shapeStartPt = null;   // start point while dragging out a shape
   let myStrokeStack = [];   // ids of strokes *I* drew on the current board, in order — powers Undo
   let undoBtn = null;
   let keydownHandler = null;
@@ -180,7 +182,13 @@
           <div class="wb-tools">
             <div class="wb-swatches">${colorSwatches}</div>
             <div class="wb-sizes">${sizeButtons}</div>
-            <button class="btn small" id="wb-eraser">\u{1F9FD} Eraser</button>
+            <button class="btn small" id="wb-eraser" data-tool="eraser">\u{1F9FD} Eraser</button>
+            <div class="wb-shape-tools">
+              <button class="btn small" id="wb-text" data-tool="text" title="Add text">\u{1F524} Text</button>
+              <button class="btn small" id="wb-line" data-tool="line" title="Draw a straight line">\u2571 Line</button>
+              <button class="btn small" id="wb-rect" data-tool="rect" title="Draw a rectangle">\u25AD Rect</button>
+              <button class="btn small" id="wb-circle" data-tool="circle" title="Draw a circle">\u25EF Circle</button>
+            </div>
             <button class="btn small" id="wb-undo" title="Undo your last stroke (Ctrl/Cmd+Z)">\u21B6 Undo</button>
             <button class="btn small" id="wb-export" title="Download this board as an image">\u2B07 PNG</button>
             <button class="btn small danger" id="wb-clear">Clear</button>
@@ -211,8 +219,15 @@
       b.classList.toggle('wb-size-active', Number(b.dataset.size) === currentSize);
       b.onclick = ()=>{ currentSize = Number(b.dataset.size); syncToolButtons(container); };
     });
-    const eraserBtn = container.querySelector('#wb-eraser');
-    eraserBtn.onclick = ()=>{ currentTool = currentTool === 'eraser' ? 'pen' : 'eraser'; syncToolButtons(container); };
+    container.querySelectorAll('[data-tool]').forEach(b=>{
+      b.onclick = ()=>{
+        const tool = b.dataset.tool;
+        currentTool = currentTool === tool ? 'pen' : tool;
+        shapeStartPt = null;
+        if(liveCtx) liveCtx.clearRect(0, 0, CANVAS_W, CANVAS_H);
+        syncToolButtons(container);
+      };
+    });
     syncToolButtons(container);
 
     myStrokeStack = [];
@@ -256,10 +271,10 @@
   }
 
   function syncToolButtons(container){
-    container.querySelectorAll('[data-color]').forEach(b=> b.classList.toggle('wb-swatch-active', b.dataset.color === currentColor && currentTool !== 'eraser'));
+    const usesColor = currentTool !== 'eraser';
+    container.querySelectorAll('[data-color]').forEach(b=> b.classList.toggle('wb-swatch-active', b.dataset.color === currentColor && usesColor));
     container.querySelectorAll('[data-size]').forEach(b=> b.classList.toggle('wb-size-active', Number(b.dataset.size) === currentSize));
-    const eraserBtn = container.querySelector('#wb-eraser');
-    if(eraserBtn) eraserBtn.classList.toggle('cc-ctrl-active', currentTool === 'eraser');
+    container.querySelectorAll('[data-tool]').forEach(b=> b.classList.toggle('cc-ctrl-active', b.dataset.tool === currentTool));
   }
 
   function watchStrokes(boardId){
@@ -290,7 +305,56 @@
     bgCtx.fillRect(0, 0, CANVAS_W, CANVAS_H);
     Object.values(strokeCache)
       .sort((a,b)=> tsVal(a.createdAt) - tsVal(b.createdAt))
-      .forEach(s=> drawStroke(bgCtx, s.points || [], s.color, s.size, s.tool));
+      .forEach(s=> renderItem(bgCtx, s));
+  }
+
+  // Dispatches a stored item to the right drawing routine based on its tool.
+  function renderItem(targetCtx, s){
+    if(s.tool === 'text') drawText(targetCtx, s.point, s.text, s.color, s.size);
+    else if(SHAPE_TOOLS.includes(s.tool)) drawShape(targetCtx, s.tool, s.start, s.end, s.color, s.size);
+    else drawStroke(targetCtx, s.points || [], s.color, s.size, s.tool);
+  }
+
+  function drawShape(targetCtx, tool, start, end, color, size){
+    if(!start || !end) return;
+    targetCtx.save();
+    targetCtx.strokeStyle = color || '#1F3A2E';
+    targetCtx.lineWidth = size || 5;
+    targetCtx.lineCap = 'round';
+    targetCtx.lineJoin = 'round';
+    if(tool === 'line'){
+      targetCtx.beginPath();
+      targetCtx.moveTo(start.x, start.y);
+      targetCtx.lineTo(end.x, end.y);
+      targetCtx.stroke();
+    }else if(tool === 'rect'){
+      const x = Math.min(start.x, end.x), y = Math.min(start.y, end.y);
+      const w = Math.abs(end.x - start.x), h = Math.abs(end.y - start.y);
+      targetCtx.strokeRect(x, y, w, h);
+    }else if(tool === 'circle'){
+      const cx = (start.x + end.x) / 2, cy = (start.y + end.y) / 2;
+      const rx = Math.abs(end.x - start.x) / 2, ry = Math.abs(end.y - start.y) / 2;
+      targetCtx.beginPath();
+      targetCtx.ellipse(cx, cy, Math.max(rx, 1), Math.max(ry, 1), 0, 0, Math.PI * 2);
+      targetCtx.stroke();
+    }
+    targetCtx.restore();
+  }
+
+  // Font size scales off the S/M/L stroke-size selector so text respects
+  // the same size control as the pen, rather than adding a separate control.
+  function fontPxForSize(size){
+    return Math.round((size || SIZES[1].px) * 4.5) + 12;
+  }
+
+  function drawText(targetCtx, point, text, color, size){
+    if(!point || !text) return;
+    targetCtx.save();
+    targetCtx.fillStyle = color || '#1F3A2E';
+    targetCtx.font = `600 ${fontPxForSize(size)}px 'Inter', sans-serif`;
+    targetCtx.textBaseline = 'top';
+    targetCtx.fillText(text, point.x, point.y);
+    targetCtx.restore();
   }
 
   function drawStroke(targetCtx, points, color, size, tool){
@@ -346,6 +410,13 @@
   }
 
   function startStroke(pt){
+    if(currentTool === 'text'){ addTextAt(pt); return; }
+    if(SHAPE_TOOLS.includes(currentTool)){
+      shapeStartPt = pt;
+      currentStrokeId = `${ctx.myId}-${Date.now()}-${Math.floor(Math.random()*1000)}`;
+      liveCtx.clearRect(0, 0, CANVAS_W, CANVAS_H);
+      return;
+    }
     currentStrokeId = `${ctx.myId}-${Date.now()}-${Math.floor(Math.random()*1000)}`;
     currentStrokePoints = [pt];
     pendingFlush = [pt];
@@ -361,7 +432,33 @@
     flushTimer = setInterval(flushPending, FLUSH_MS);
   }
 
+  // Text is placed with a single click via a prompt, rather than a drag —
+  // it's created and committed to Firestore immediately, no live-drag phase.
+  function addTextAt(pt){
+    const text = prompt('Text to add to the board:');
+    if(text === null || !text.trim()) return;
+    const id = `${ctx.myId}-${Date.now()}-${Math.floor(Math.random()*1000)}`;
+    const item = {
+      tool: 'text', point: pt, text: text.trim(), color: currentColor, size: currentSize,
+      createdBy: ctx.myId, createdByName: ctx.myName,
+      createdAt: firebase.firestore.FieldValue.serverTimestamp(), done: true
+    };
+    strokesCol(activeBoardId).doc(id).set(item).catch(()=>{});
+    myStrokeStack.push(id);
+    updateUndoButton();
+    // Fold in locally for an instant, gap-free appearance.
+    strokeCache[id] = { id, ...item, createdAt: { toMillis: ()=> Date.now() } };
+    redraw();
+  }
+
   function extendStroke(pt){
+    if(SHAPE_TOOLS.includes(currentTool)){
+      if(!shapeStartPt) return;
+      liveCtx.clearRect(0, 0, CANVAS_W, CANVAS_H);
+      drawShape(liveCtx, currentTool, shapeStartPt, pt, currentColor, currentSize);
+      currentStrokePoints = [pt]; // remembers the latest point for endStroke
+      return;
+    }
     const last = currentStrokePoints[currentStrokePoints.length - 1];
     currentStrokePoints.push(pt);
     pendingFlush.push(pt);
@@ -386,6 +483,27 @@
   }
 
   function endStroke(){
+    if(SHAPE_TOOLS.includes(currentTool)){
+      const start = shapeStartPt;
+      const end = currentStrokePoints[currentStrokePoints.length - 1] || start;
+      shapeStartPt = null;
+      liveCtx.clearRect(0, 0, CANVAS_W, CANVAS_H);
+      if(!start || !currentStrokeId){ currentStrokeId = null; currentStrokePoints = []; return; }
+      const id = currentStrokeId;
+      const item = {
+        tool: currentTool, start, end, color: currentColor, size: currentSize,
+        createdBy: ctx.myId, createdByName: ctx.myName,
+        createdAt: firebase.firestore.FieldValue.serverTimestamp(), done: true
+      };
+      strokesCol(activeBoardId).doc(id).set(item).catch(()=>{});
+      myStrokeStack.push(id);
+      updateUndoButton();
+      strokeCache[id] = { id, ...item, createdAt: { toMillis: ()=> Date.now() } };
+      redraw();
+      currentStrokeId = null;
+      currentStrokePoints = [];
+      return;
+    }
     clearInterval(flushTimer); flushTimer = null;
     flushPending();
     if(activeBoardId && currentStrokeId){
