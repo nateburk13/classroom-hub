@@ -72,6 +72,21 @@
   function boardsCol(){ return db.collection('classes').doc(ctx.classId).collection('whiteboards'); }
   function strokesCol(boardId){ return boardsCol().doc(boardId).collection('strokes'); }
   function cursorsCol(boardId){ return boardsCol().doc(boardId).collection('cursors'); }
+  // Surfaces write failures instead of swallowing them — a silently-rejected
+  // write (e.g. blocked by Firestore security rules) shows up locally at
+  // first (optimistic UI) then vanishes moments later when the SDK rolls
+  // it back, which otherwise looks like an unexplained disappearing item.
+  let writeErrorShown = false;
+  function reportWriteError(err){
+    console.error('Whiteboard save failed:', err);
+    if(writeErrorShown) return;
+    writeErrorShown = true;
+    alert('This didn\'t save to the board and will disappear again shortly.\n\n' +
+      'Reason: ' + (err && err.message ? err.message : err) + '\n\n' +
+      'This usually means your Firestore security rules are rejecting this item\'s data ' +
+      '(often because they were tightened to only allow the original pen/eraser stroke shape). ' +
+      'Check Firebase Console \u2192 Firestore Database \u2192 Rules.');
+  }
   function colorForUser(userId){
     let hash = 0;
     for(let i=0;i<userId.length;i++) hash = (hash*31 + userId.charCodeAt(i)) >>> 0;
@@ -408,7 +423,11 @@
     unsubStrokes = strokesCol(boardId).orderBy('createdAt').onSnapshot(snap=>{
       snap.docChanges().forEach(change=>{
         if(change.type === 'removed'){ delete strokeCache[change.doc.id]; return; }
-        strokeCache[change.doc.id] = { id: change.doc.id, ...change.doc.data() };
+        // 'estimate' avoids createdAt reading as null while our own write is
+        // still pending confirmation — a null createdAt sorts as time-zero,
+        // which silently buries a brand-new item under older content on the
+        // very next redraw (this was the "disappears right after adding" bug).
+        strokeCache[change.doc.id] = { id: change.doc.id, ...change.doc.data({ serverTimestamps: 'estimate' }) };
       });
       redraw();
     }, ()=>{});
@@ -595,8 +614,7 @@
     strokesCol(activeBoardId).doc(currentStrokeId).set({
       color: currentColor, size: currentSize, tool: currentTool,
       points: [pt], createdBy: ctx.myId, createdByName: ctx.myName,
-      createdAt: firebase.firestore.FieldValue.serverTimestamp(), done: false
-    }).catch(()=>{});
+    }).catch(reportWriteError);
     myStrokeStack.push(currentStrokeId);
     updateUndoButton();
     flushTimer = setInterval(flushPending, FLUSH_MS);
@@ -614,7 +632,7 @@
       createdBy: ctx.myId, createdByName: ctx.myName,
       createdAt: firebase.firestore.FieldValue.serverTimestamp(), done: true
     };
-    strokesCol(activeBoardId).doc(id).set(item).catch(()=>{});
+    strokesCol(activeBoardId).doc(id).set(item).catch(reportWriteError);
     myStrokeStack.push(id);
     updateUndoButton();
     // Fold in locally for an instant, gap-free appearance. Capture a fixed
@@ -632,7 +650,7 @@
       createdBy: ctx.myId, createdByName: ctx.myName,
       createdAt: firebase.firestore.FieldValue.serverTimestamp(), done: true
     };
-    strokesCol(activeBoardId).doc(id).set(item).catch(()=>{});
+    strokesCol(activeBoardId).doc(id).set(item).catch(reportWriteError);
     myStrokeStack.push(id);
     updateUndoButton();
     const nowMs = Date.now();
@@ -685,7 +703,7 @@
         createdBy: ctx.myId, createdByName: ctx.myName,
         createdAt: firebase.firestore.FieldValue.serverTimestamp(), done: true
       };
-      strokesCol(activeBoardId).doc(id).set(item).catch(()=>{});
+      strokesCol(activeBoardId).doc(id).set(item).catch(reportWriteError);
       myStrokeStack.push(id);
       updateUndoButton();
       const shapeNowMs = Date.now();
@@ -779,7 +797,7 @@
       snap.docChanges().forEach(change=>{
         if(change.doc.id === ctx.myId) return; // never render my own cursor
         if(change.type === 'removed'){ delete cursorCache[change.doc.id]; return; }
-        cursorCache[change.doc.id] = { id: change.doc.id, ...change.doc.data() };
+        cursorCache[change.doc.id] = { id: change.doc.id, ...change.doc.data({ serverTimestamps: 'estimate' }) };
       });
       renderCursors();
     }, ()=>{});
