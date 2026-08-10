@@ -338,12 +338,21 @@
       b.onclick = ()=>{
         currentColor = b.dataset.color;
         if(editingId){ applyTextStyle({ color: currentColor }); }
+        else if(selectedId && objectCache[selectedId]){ recolorObject(selectedId, currentColor); }
         syncToolButtons(container);
       };
     });
     container.querySelectorAll('[data-size]').forEach(b=>{
       b.classList.toggle('wb-size-active', Number(b.dataset.size) === currentSize);
-      b.onclick = ()=>{ currentSize = Number(b.dataset.size); syncToolButtons(container); };
+      b.onclick = ()=>{
+        currentSize = Number(b.dataset.size);
+        if(selectedId && objectCache[selectedId] && (objectCache[selectedId].type === 'path' || objectCache[selectedId].type === 'shape')){
+          patchObject(selectedId, { size: currentSize });
+          const node = objectEls[selectedId];
+          if(node) refreshObjectContent(node, objectCache[selectedId]);
+        }
+        syncToolButtons(container);
+      };
     });
 
     // ---- Select / Pen / Eraser ----
@@ -613,6 +622,17 @@
     if(!objectCache[id]) return;
     patchObject(id, { zIndex: nextZIndex() });
     rebuildObjectsLayer();
+  }
+
+  // Recolors any selected object in place — text uses its own color field
+  // via applyTextStyle while editing; this covers shapes, pen strokes, and
+  // a text box's color when it's selected but not currently being typed in.
+  function recolorObject(id, color){
+    const obj = objectCache[id];
+    if(!obj) return;
+    patchObject(id, { color });
+    const node = objectEls[id];
+    if(node) refreshObjectContent(node, objectCache[id]);
   }
 
   async function undoLastCreate(){
