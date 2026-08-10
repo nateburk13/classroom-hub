@@ -471,6 +471,7 @@
     container.querySelectorAll('#wb-select,#wb-pen,#wb-eraser').forEach(b=> b.classList.toggle('cc-ctrl-active', b.dataset.tool === currentTool));
     container.querySelectorAll('[data-color]').forEach(b=> b.classList.toggle('wb-swatch-active', b.dataset.color === currentColor));
     container.querySelectorAll('[data-size]').forEach(b=> b.classList.toggle('wb-size-active', Number(b.dataset.size) === currentSize));
+    if(wrapEl) wrapEl.classList.toggle('wb-tool-select', currentTool === 'select');
     const shapesToggle = container.querySelector('#wb-shapes-toggle');
     if(shapesToggle) shapesToggle.classList.toggle('cc-ctrl-active', SHAPE_TOOLS.includes(currentTool));
     const textToggle = container.querySelector('#wb-text-toggle');

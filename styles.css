@@ -376,12 +376,14 @@ button.btn:disabled{opacity:0.4;cursor:not-allowed;}
 .wb-size-active{background:var(--amber);border-color:var(--amber-dark);}
 
 .wb-canvas-wrap{position:relative;flex:1;border-radius:12px;overflow:hidden;border:0.5px solid var(--line);background:#fff;box-shadow:var(--shadow);cursor:crosshair;}
+.wb-canvas-wrap.wb-tool-select{cursor:default;}
 .wb-objects-layer{position:absolute;inset:0;width:100%;height:100%;}
 .wb-preview-layer{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;}
 .wb-cursor-layer{position:absolute;inset:0;pointer-events:none;overflow:hidden;}
 
 /* ---- objects (text / shape / image / path) ---- */
-.wb-obj{position:absolute;box-sizing:border-box;cursor:move;}
+.wb-obj{position:absolute;box-sizing:border-box;cursor:grab;}
+.wb-obj:active{cursor:grabbing;}
 .wb-obj-content{width:100%;height:100%;position:relative;}
 .wb-obj-svg{width:100%;height:100%;display:block;overflow:visible;pointer-events:none;}
 .wb-obj-img{width:100%;height:100%;object-fit:fill;display:block;pointer-events:none;user-select:none;}
