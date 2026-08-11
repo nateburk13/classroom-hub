@@ -260,6 +260,7 @@ function teardownListeners(){
   Whiteboard.teardown();
   assignments = []; announcements = []; quizzes = []; books = []; homework = []; presence = [];
   loaded = { assignments: false, announcements: false, quizzes: false, books: false, homework: false, students: false };
+  showNewHwForm = false; hwResponsesExpanded = {};
 }
 
 /* --------------------------- 2. STATE --------------------------- */
@@ -290,6 +291,10 @@ const HOMEWORK_CATEGORIES = [
   { id:'speech', label:'Speech' }
 ];
 let currentHwCategory = 'grammar';
+// Inline "Writing" tab state (see renderWritingTeacherView): whether the new-
+// prompt form is open, and which prompts have their responses expanded.
+let showNewHwForm = false;
+let hwResponsesExpanded = {};
 const PRESENCE_ONLINE_MS = 60000; // no heartbeat within this window = shown offline
 const TEACHER_PRESENCE_ID = '__teacher__';
 let teacherPresenceInterval = null;
@@ -605,17 +610,25 @@ function renderHomework(){
   setHeader('Homework', 'Create homework by category and track submissions.');
   const activeLabel = HOMEWORK_CATEGORIES.find(c=> c.id === currentHwCategory).label;
   let html = `<div class="pill-tabs">${HOMEWORK_CATEGORIES.map(c=> `<button class="pill-tab ${c.id===currentHwCategory?'active':''}" data-hw-cat="${c.id}">${c.label}</button>`).join('')}</div>`;
-  html += `<div class="section-head"><div></div><button class="btn primary small" id="btn-new-homework">New ${activeLabel.toLowerCase()} homework</button></div>`;
 
   if(!loaded.homework){
     html += `<div class="empty"><h3>Loading homework…</h3><p>Connecting to your class.</p></div>`;
     viewRoot.innerHTML = html;
     wireHomeworkTabs();
-    document.getElementById('btn-new-homework').onclick = ()=> openHomeworkModal(currentHwCategory);
     return;
   }
 
   const items = homework.filter(h=> h.category === currentHwCategory);
+
+  if(currentHwCategory === 'writing'){
+    html += renderWritingTeacherView(items);
+    viewRoot.innerHTML = html;
+    wireHomeworkTabs();
+    wireWritingTeacherView();
+    return;
+  }
+
+  html += `<div class="section-head"><div></div><button class="btn primary small" id="btn-new-homework">New ${activeLabel.toLowerCase()} homework</button></div>`;
   if(items.length === 0){
     html += `<div class="empty"><h3>No ${activeLabel.toLowerCase()} homework yet</h3><p>Create the first one for this category.</p></div>`;
   }else{
@@ -652,6 +665,110 @@ function statusForHomework(h){
   if(h.submissionCount > 0) return { cls:'submitted', label: overdue ? 'in — was due' : 'submissions in' };
   if(overdue) return { cls:'overdue', label:'overdue' };
   return { cls:'assigned', label:'open' };
+}
+
+/* Writing tab: prompts are created inline (no popup) and each prompt's
+   responses expand in place underneath it, so the teacher can read full
+   student writing without a cramped modal table. */
+function renderWritingTeacherView(items){
+  let html = `<div class="section-head"><div></div><button class="btn primary small" id="btn-toggle-writing-form">${showNewHwForm ? 'Cancel' : 'New writing prompt'}</button></div>`;
+
+  if(showNewHwForm){
+    html += `<div class="card">
+      <div class="field"><label>Title</label><input id="wp-title" placeholder="Descriptive paragraph"></div>
+      <div class="field"><label>Prompt / instructions</label><textarea id="wp-instr" rows="4" placeholder="Write a paragraph describing your favorite place. Include at least 3 sensory details."></textarea></div>
+      <div class="field"><label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="wp-has-due" style="width:auto;" checked> Has a due date</label>
+        <input id="wp-due" type="date" value="${addDays(7)}">
+      </div>
+      <div class="field"><label>Attach a reference file or image (optional)</label><input id="wp-file" type="file" accept="image/*,.pdf,.doc,.docx"></div>
+      <div class="form-actions"><button class="btn small" id="wp-cancel">Cancel</button><button class="btn primary small" id="wp-save">Post prompt</button></div>
+      <div class="gate-error" id="wp-error"></div>
+    </div>`;
+  }
+
+  if(items.length === 0){
+    html += `<div class="empty"><h3>No writing prompts yet</h3><p>Add a prompt above to get started.</p></div>`;
+  }else{
+    [...items].sort((a,b)=> (a.dueDate||'').localeCompare(b.dueDate||'')).forEach(h=>{
+      const status = statusForHomework(h);
+      const expanded = !!hwResponsesExpanded[h.id];
+      html += `<div class="card">
+        <div class="card-row">
+          <div>
+            <h3>${escapeHtml(h.title)}</h3>
+            <div class="meta">${h.dueDate ? `Due ${h.dueDate} · ` : 'No due date · '}${h.submissionCount} submitted</div>
+            <p class="body-text">${escapeHtml(h.instructions)}</p>
+            ${h.attachmentUrl ? `<a href="${h.attachmentUrl}" download="${escapeHtml(h.attachmentName || 'attachment')}" class="meta" style="color:var(--forest);text-decoration:underline;">📎 ${escapeHtml(h.attachmentName || 'attachment')}</a>` : ''}
+          </div>
+          <span class="stamp ${status.cls}">${status.label}</span>
+        </div>
+        <div class="form-actions">
+          <button class="btn small" data-wr-toggle="${h.id}">${expanded ? 'Hide responses' : 'View responses'}</button>
+          <button class="btn small danger" data-hw-delete="${h.id}">Delete</button>
+        </div>
+        <div id="wr-responses-${h.id}">${expanded ? '<p class="meta" style="margin-top:10px;">Loading…</p>' : ''}</div>
+      </div>`;
+    });
+  }
+  return html;
+}
+
+function wireWritingTeacherView(){
+  document.getElementById('btn-toggle-writing-form').onclick = ()=>{ showNewHwForm = !showNewHwForm; render(); };
+  if(showNewHwForm){
+    document.getElementById('wp-has-due').onchange = (e)=>{ document.getElementById('wp-due').disabled = !e.target.checked; };
+    document.getElementById('wp-cancel').onclick = ()=>{ showNewHwForm = false; render(); };
+    document.getElementById('wp-save').onclick = async ()=>{
+      const title = document.getElementById('wp-title').value.trim();
+      const err = document.getElementById('wp-error');
+      if(!title){ err.textContent = 'Give the prompt a title.'; return; }
+      const saveBtn = document.getElementById('wp-save');
+      saveBtn.disabled = true; saveBtn.textContent = 'Saving…'; err.textContent = '';
+      try{
+        const file = document.getElementById('wp-file').files[0];
+        const attachmentUrl = file ? await fileToAttachment(file) : null;
+        const hasDue = document.getElementById('wp-has-due').checked;
+        await db.collection('classes').doc(classId).collection('homework').add({
+          category: 'writing',
+          title,
+          instructions: document.getElementById('wp-instr').value.trim(),
+          dueDate: hasDue ? (document.getElementById('wp-due').value || addDays(7)) : null,
+          attachmentName: file ? file.name : null,
+          attachmentUrl,
+          createdAt: firebase.firestore.FieldValue.serverTimestamp()
+        });
+        showNewHwForm = false;
+      }catch(e){
+        saveBtn.disabled = false; saveBtn.textContent = 'Post prompt';
+        err.textContent = e.message || "Couldn't save — check your connection and try again.";
+      }
+    };
+  }
+  viewRoot.querySelectorAll('[data-wr-toggle]').forEach(b=> b.onclick = ()=> toggleWritingResponses(b.dataset.wrToggle));
+  viewRoot.querySelectorAll('[data-hw-delete]').forEach(b=> b.onclick = ()=> deleteHomework(b.dataset.hwDelete));
+}
+
+async function toggleWritingResponses(hwId){
+  const wasExpanded = !!hwResponsesExpanded[hwId];
+  hwResponsesExpanded[hwId] = !wasExpanded;
+  if(wasExpanded){ render(); return; }
+  render(); // shows the "Loading…" placeholder immediately
+  const subsSnap = await db.collection('classes').doc(classId).collection('homework').doc(hwId).collection('submissions').get();
+  const container = document.getElementById('wr-responses-' + hwId);
+  if(!container) return; // user switched tabs before this resolved
+  if(subsSnap.empty){ container.innerHTML = '<p class="meta" style="margin-top:10px;">No responses yet.</p>'; return; }
+  const docs = [...subsSnap.docs].sort((a,b)=> (a.data().studentName || '').localeCompare(b.data().studentName || ''));
+  let html = '<div style="margin-top:10px;display:flex;flex-direction:column;gap:10px;">';
+  docs.forEach(d=>{
+    const s = d.data();
+    html += `<div style="border-top:0.5px solid var(--line);padding-top:10px;">
+      <div style="display:flex;justify-content:space-between;gap:10px;"><strong style="font-size:13px;">${escapeHtml(s.studentName)}</strong><span class="meta">attempt ${s.attemptCount || 1} · ${timeAgo(tsVal(s.submittedAt))}</span></div>
+      ${s.text ? `<p class="body-text" style="white-space:pre-wrap;margin-top:6px;">${escapeHtml(s.text)}</p>` : '<p class="meta" style="margin-top:6px;">(no typed text)</p>'}
+      ${s.attachmentUrl ? `<a href="${s.attachmentUrl}" download="${escapeHtml(s.attachmentName || 'file')}" class="meta">📎 ${escapeHtml(s.attachmentName || 'attached file')}</a>` : ''}
+    </div>`;
+  });
+  html += '</div>';
+  container.innerHTML = html;
 }
 
 function renderQuizzes(){

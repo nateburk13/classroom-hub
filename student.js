@@ -119,6 +119,7 @@ function teardownListeners(){
   assignments = []; announcements = []; quizzes = []; books = []; homework = [];
   mySubmissions = {}; myQuizResponses = {}; selectedMcAnswer = {}; myHwSubmissions = {};
   loaded = { assignments: false, announcements: false, quizzes: false, books: false, homework: false };
+  hwExpanded = {};
 }
 
 /* Lightweight presence: write a "last seen" timestamp on a per-student doc
@@ -330,6 +331,8 @@ let selectedMcAnswer = {}; // "quizId-questionId" -> chosen option text (before 
 let homework = [];
 let myHwSubmissions = {}; // homeworkId -> { text, attachmentUrl, attemptCount, submittedAt } | null
 let currentHwCategory = 'grammar';
+// Which writing prompts currently have their inline "write here" panel open.
+let hwExpanded = {};
 // Fixed set of categories — a field on each doc rather than separate
 // collections, so the UI can filter client-side.
 const HOMEWORK_CATEGORIES = [
@@ -577,6 +580,14 @@ function renderHomework(){
     return;
   }
 
+  if(currentHwCategory === 'writing'){
+    [...items].sort((a,b)=> (a.dueDate||'').localeCompare(b.dueDate||'')).forEach(h=>{ html += renderWritingStudentCard(h); });
+    viewRoot.innerHTML = html;
+    wireHomeworkTabs();
+    wireWritingStudentCards();
+    return;
+  }
+
   [...items].sort((a,b)=> (a.dueDate||'').localeCompare(b.dueDate||'')).forEach(h=>{
     const status = statusForHomework(h);
     const sub = myHwSubmissions[h.id];
@@ -614,6 +625,113 @@ function statusForHomework(h){
   if(sub) return { cls:'submitted', label:'submitted' };
   if(overdue) return { cls:'overdue', label:'overdue' };
   return { cls:'assigned', label:'assigned' };
+}
+
+/* Writing tab: students write directly in the page instead of a popup, with
+   a live word count and an autosaved local draft. Resubmitting just updates
+   the same doc and bumps attemptCount, same as the other homework types. */
+function renderWritingStudentCard(h){
+  const sub = myHwSubmissions[h.id];
+  const status = statusForHomework(h);
+  const overdue = h.dueDate && new Date(h.dueDate) < new Date(new Date().toDateString());
+  const expanded = !!hwExpanded[h.id];
+
+  let card = `<div class="card">
+    <div class="card-row">
+      <div>
+        <h3>${escapeHtml(h.title)}</h3>
+        <div class="meta">${h.dueDate ? `Due ${h.dueDate}` : 'No due date'}</div>
+        <p class="body-text">${escapeHtml(h.instructions)}</p>
+        ${h.attachmentUrl ? `<a href="${h.attachmentUrl}" download="${escapeHtml(h.attachmentName || 'attachment')}" class="meta" style="color:var(--forest);text-decoration:underline;">📎 ${escapeHtml(h.attachmentName || 'attachment')}</a>` : ''}
+      </div>
+      <span class="stamp ${status.cls}">${status.label}</span>
+    </div>`;
+
+  if(sub && !expanded){
+    card += `<div class="meta" style="margin-top:8px;">Last saved ${timeAgo(tsVal(sub.submittedAt))} (attempt ${sub.attemptCount || 1})</div>`;
+  }
+
+  if(overdue && !expanded){
+    card += sub
+      ? `<div class="meta" style="margin-top:6px;">Due date passed — your last submission is locked in.</div>
+         <div class="body-text" style="white-space:pre-wrap;background:var(--cream);border-radius:8px;padding:10px 12px;margin-top:6px;">${escapeHtml(sub.text || '')}</div>
+         ${sub.attachmentUrl ? `<a href="${sub.attachmentUrl}" download="${escapeHtml(sub.attachmentName || 'file')}" class="meta">📎 your uploaded file</a>` : ''}`
+      : `<div class="form-actions"><span class="meta">Due date passed — no longer accepting submissions.</span></div>`;
+  }else if(!expanded){
+    card += `<div class="form-actions"><button class="btn ${sub ? '' : 'primary'} small" data-hw-expand="${h.id}">${sub ? 'Continue writing' : 'Start writing'}</button></div>`;
+  }else{
+    const draft = sub ? (sub.text || '') : (localStorage.getItem(draftKey(h.id)) || '');
+    const words = draft.trim() ? draft.trim().split(/\s+/).length : 0;
+    card += `<div class="field" style="margin-top:12px;">
+      <label>Your response</label>
+      <textarea id="wr-text-${h.id}" rows="10" placeholder="Start writing here…">${escapeHtml(draft)}</textarea>
+      <div class="meta" id="wr-count-${h.id}" style="margin-top:4px;">${words} word${words === 1 ? '' : 's'}</div>
+    </div>
+    <div class="field"><label>Or attach a file/photo instead (optional)</label><input id="wr-file-${h.id}" type="file" accept="image/*,.pdf,.doc,.docx"></div>
+    ${sub && sub.attachmentUrl ? `<div class="meta">Current file: <a href="${sub.attachmentUrl}" download="${escapeHtml(sub.attachmentName || 'file')}">${escapeHtml(sub.attachmentName || 'attachment')}</a> — choosing a new file replaces it.</div>` : ''}
+    <div class="form-actions">
+      <button class="btn small" data-hw-collapse="${h.id}">Cancel</button>
+      <button class="btn primary small" data-hw-save="${h.id}">${sub ? 'Update submission' : 'Submit'}</button>
+    </div>
+    <div class="gate-error" id="wr-error-${h.id}"></div>`;
+  }
+
+  card += `</div>`;
+  return card;
+}
+
+function wireWritingStudentCards(){
+  viewRoot.querySelectorAll('[data-hw-expand]').forEach(b=> b.onclick = ()=>{ hwExpanded[b.dataset.hwExpand] = true; render(); });
+  viewRoot.querySelectorAll('[data-hw-collapse]').forEach(b=> b.onclick = ()=>{ hwExpanded[b.dataset.hwCollapse] = false; render(); });
+  viewRoot.querySelectorAll('[data-hw-save]').forEach(b=> b.onclick = ()=> saveWritingSubmission(b.dataset.hwSave));
+  // Live word count + debounced local draft save, without re-rendering the
+  // whole tab on every keystroke (which would lose focus/cursor position).
+  viewRoot.querySelectorAll('textarea[id^="wr-text-"]').forEach(ta=>{
+    const hwId = ta.id.replace('wr-text-', '');
+    let draftTimer = null;
+    ta.addEventListener('input', ()=>{
+      const words = ta.value.trim() ? ta.value.trim().split(/\s+/).length : 0;
+      const countEl = document.getElementById('wr-count-' + hwId);
+      if(countEl) countEl.textContent = `${words} word${words === 1 ? '' : 's'}`;
+      clearTimeout(draftTimer);
+      draftTimer = setTimeout(()=>{
+        if(!myHwSubmissions[hwId]) localStorage.setItem(draftKey(hwId), ta.value);
+      }, 500);
+    });
+  });
+}
+
+async function saveWritingSubmission(hwId){
+  const existing = myHwSubmissions[hwId];
+  const ta = document.getElementById('wr-text-' + hwId);
+  const fileInput = document.getElementById('wr-file-' + hwId);
+  const err = document.getElementById('wr-error-' + hwId);
+  const text = ta.value.trim();
+  const file = fileInput.files[0];
+  if(!text && !file && !(existing && existing.attachmentUrl)){ err.textContent = 'Write something or attach a file before submitting.'; return; }
+  const saveBtn = document.querySelector(`[data-hw-save="${hwId}"]`);
+  saveBtn.disabled = true; saveBtn.textContent = 'Saving…'; err.textContent = '';
+  try{
+    let attachmentUrl = existing ? (existing.attachmentUrl || null) : null;
+    let attachmentName = existing ? (existing.attachmentName || null) : null;
+    if(file){ attachmentUrl = await fileToAttachment(file); attachmentName = file.name; }
+    const attemptCount = (existing && existing.attemptCount ? existing.attemptCount : 0) + 1;
+    await db.collection('classes').doc(classId).collection('homework').doc(hwId)
+      .collection('submissions').doc(studentDocId()).set({
+        studentName, text, attachmentUrl, attachmentName, attemptCount,
+        submittedAt: firebase.firestore.FieldValue.serverTimestamp()
+      });
+    localStorage.removeItem(draftKey(hwId));
+    // Optimistic local update — the homework listener only refires on
+    // homework-doc changes, not submission writes, so update state directly
+    // for instant feedback instead of waiting on the next snapshot.
+    myHwSubmissions[hwId] = { studentName, text, attachmentUrl, attachmentName, attemptCount, submittedAt: { toMillis: ()=> Date.now() } };
+    hwExpanded[hwId] = false;
+    render();
+  }catch(e){
+    saveBtn.disabled = false; saveBtn.textContent = existing ? 'Update submission' : 'Submit';
+    err.textContent = e.message || "Couldn't save — check your connection and try again.";
+  }
 }
 
 function renderAnnouncements(){
