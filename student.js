@@ -108,16 +108,17 @@ function teardownListeners(){
   if(unsubAnnouncements) unsubAnnouncements();
   if(unsubQuizzes) unsubQuizzes();
   if(unsubBooks) unsubBooks();
-  unsubAssignments = unsubAnnouncements = unsubQuizzes = unsubBooks = null;
+  if(unsubHomework) unsubHomework();
+  unsubAssignments = unsubAnnouncements = unsubQuizzes = unsubBooks = unsubHomework = null;
   stopPresence();
   ClassroomCall.teardown();
   Whiteboard.teardown();
   if(unsubIncomingCall){ unsubIncomingCall(); unsubIncomingCall = null; }
   cleanupCallLocal();
   hideIncomingCallBanner();
-  assignments = []; announcements = []; quizzes = []; books = [];
-  mySubmissions = {}; myQuizResponses = {}; selectedMcAnswer = {};
-  loaded = { assignments: false, announcements: false, quizzes: false, books: false };
+  assignments = []; announcements = []; quizzes = []; books = []; homework = [];
+  mySubmissions = {}; myQuizResponses = {}; selectedMcAnswer = {}; myHwSubmissions = {};
+  loaded = { assignments: false, announcements: false, quizzes: false, books: false, homework: false };
 }
 
 /* Lightweight presence: write a "last seen" timestamp on a per-student doc
@@ -326,8 +327,20 @@ let books = [];
 let mySubmissions = {}; // assignmentId -> { text, submittedAt }
 let myQuizResponses = {}; // quizId -> { studentName, answers: { questionId: { attempts:[], solved } } }
 let selectedMcAnswer = {}; // "quizId-questionId" -> chosen option text (before submit)
-let loaded = { assignments: false, announcements: false, quizzes: false, books: false };
-let unsubAssignments = null, unsubAnnouncements = null, unsubQuizzes = null, unsubBooks = null;
+let homework = [];
+let myHwSubmissions = {}; // homeworkId -> { text, attachmentUrl, attemptCount, submittedAt } | null
+let currentHwCategory = 'grammar';
+// Fixed set of categories — a field on each doc rather than separate
+// collections, so the UI can filter client-side.
+const HOMEWORK_CATEGORIES = [
+  { id:'grammar', label:'Grammar' },
+  { id:'writing', label:'Writing' },
+  { id:'vocab', label:'Vocab' },
+  { id:'spelling', label:'Spelling' },
+  { id:'speech', label:'Speech' }
+];
+let loaded = { assignments: false, announcements: false, quizzes: false, books: false, homework: false };
+let unsubAssignments = null, unsubAnnouncements = null, unsubQuizzes = null, unsubBooks = null, unsubHomework = null;
 let presenceInterval = null;
 const PRESENCE_HEARTBEAT_MS = 25000; // how often we tell the teacher we're still here
 
@@ -395,6 +408,19 @@ function startApp(id, info, name){
       markSynced(true);
     }, ()=> markSynced(false));
 
+  unsubHomework = db.collection('classes').doc(classId).collection('homework')
+    .onSnapshot(async (snap)=>{
+      homework = snap.docs.map(d=>({ id:d.id, ...d.data() }));
+      for(const h of homework){
+        const subDoc = await db.collection('classes').doc(classId).collection('homework').doc(h.id)
+          .collection('submissions').doc(studentDocId()).get();
+        myHwSubmissions[h.id] = subDoc.exists ? subDoc.data() : null;
+      }
+      loaded.homework = true;
+      render();
+      markSynced(true);
+    }, ()=> markSynced(false));
+
   unsubBooks = db.collection('classes').doc(classId).collection('books')
     .onSnapshot((snap)=>{
       books = snap.docs.map(d=>({ id:d.id, ...d.data() }))
@@ -455,7 +481,7 @@ const viewRoot = document.getElementById('view-root');
 
 function render(){
   document.querySelectorAll('.nav-btn').forEach(b=> b.classList.toggle('active', b.dataset.view === currentView));
-  const renderers = { dashboard: renderDashboard, assignments: renderAssignments, announcements: renderAnnouncements, quizzes: renderQuizzes, books: renderBooks, whiteboard: renderWhiteboard };
+  const renderers = { dashboard: renderDashboard, assignments: renderAssignments, announcements: renderAnnouncements, homework: renderHomework, quizzes: renderQuizzes, books: renderBooks, whiteboard: renderWhiteboard };
   (renderers[currentView] || renderDashboard)();
 }
 
@@ -529,6 +555,65 @@ function renderAssignments(){
   });
   viewRoot.innerHTML = html;
   viewRoot.querySelectorAll('[data-submit]').forEach(b=> b.onclick = ()=> openSubmitModal(b.dataset.submit));
+}
+
+function renderHomework(){
+  setHeader('Homework', "Complete homework in each category — resubmit anytime before it's due.");
+  const activeLabel = HOMEWORK_CATEGORIES.find(c=> c.id === currentHwCategory).label;
+  let html = `<div class="pill-tabs">${HOMEWORK_CATEGORIES.map(c=> `<button class="pill-tab ${c.id===currentHwCategory?'active':''}" data-hw-cat="${c.id}">${c.label}</button>`).join('')}</div>`;
+
+  if(!loaded.homework){
+    html += `<div class="empty"><h3>Loading homework…</h3><p>Connecting to your class.</p></div>`;
+    viewRoot.innerHTML = html;
+    wireHomeworkTabs();
+    return;
+  }
+
+  const items = homework.filter(h=> h.category === currentHwCategory);
+  if(items.length === 0){
+    html += `<div class="empty"><h3>No ${activeLabel.toLowerCase()} homework yet</h3><p>Check back once your teacher posts something here.</p></div>`;
+    viewRoot.innerHTML = html;
+    wireHomeworkTabs();
+    return;
+  }
+
+  [...items].sort((a,b)=> (a.dueDate||'').localeCompare(b.dueDate||'')).forEach(h=>{
+    const status = statusForHomework(h);
+    const sub = myHwSubmissions[h.id];
+    const overdue = h.dueDate && new Date(h.dueDate) < new Date(new Date().toDateString());
+    html += `<div class="card">
+      <div class="card-row">
+        <div>
+          <h3>${escapeHtml(h.title)}</h3>
+          <div class="meta">${h.dueDate ? `Due ${h.dueDate}` : 'No due date'}</div>
+          <p class="body-text">${escapeHtml(h.instructions)}</p>
+          ${h.attachmentUrl ? `<a href="${h.attachmentUrl}" download="${escapeHtml(h.attachmentName || 'attachment')}" class="meta" style="color:var(--forest);text-decoration:underline;">📎 ${escapeHtml(h.attachmentName || 'attachment')}</a>` : ''}
+        </div>
+        <span class="stamp ${status.cls}">${status.label}</span>
+      </div>`;
+    if(sub){
+      html += `<div class="meta" style="margin-top:8px;">Submitted ${timeAgo(tsVal(sub.submittedAt))} (attempt ${sub.attemptCount || 1})${sub.text ? `: "${escapeHtml(sub.text)}"` : ''}${sub.attachmentUrl ? ` · <a href="${sub.attachmentUrl}" download="${escapeHtml(sub.attachmentName || 'file')}">📎 your file</a>` : ''}</div>`;
+    }
+    if(overdue){
+      html += `<div class="form-actions"><span class="meta">${sub ? 'Due date passed — your last submission is locked in.' : 'Due date passed — no longer accepting submissions.'}</span></div>`;
+    }else{
+      html += `<div class="form-actions"><button class="btn ${sub ? '' : 'primary'} small" data-hw-submit="${h.id}">${sub ? 'Update submission' : 'Submit work'}</button></div>`;
+    }
+    html += `</div>`;
+  });
+  viewRoot.innerHTML = html;
+  wireHomeworkTabs();
+  viewRoot.querySelectorAll('[data-hw-submit]').forEach(b=> b.onclick = ()=> openHomeworkSubmitModal(b.dataset.hwSubmit));
+}
+function wireHomeworkTabs(){
+  viewRoot.querySelectorAll('[data-hw-cat]').forEach(b=> b.onclick = ()=>{ currentHwCategory = b.dataset.hwCat; render(); });
+}
+function statusForHomework(h){
+  const overdue = h.dueDate && new Date(h.dueDate) < new Date(new Date().toDateString());
+  const sub = myHwSubmissions[h.id];
+  if(sub) return { cls:'submitted', label:'submitted' };
+  if(overdue) return { cls:'overdue', label:'overdue' };
+  return { cls:'assigned', label:'assigned' };
 }
 
 function renderAnnouncements(){
@@ -808,6 +893,81 @@ function openSubmitModal(assignmentId){
       saveBtn.disabled = false;
       saveBtn.textContent = existing ? 'Update' : 'Submit';
       err.textContent = "Couldn't save — check your connection and try again.";
+    }
+  };
+}
+
+// Turns an uploaded file into a data-URL suitable for storing on a Firestore
+// doc: images get shrunk/compressed on a canvas; other file types (PDF,
+// Word, etc.) are read raw but capped in size since Firestore documents max
+// out around 1MB.
+function resizeImageToDataUrl(file, maxWidth, quality){
+  return new Promise((resolve, reject)=>{
+    const reader = new FileReader();
+    reader.onerror = ()=> reject(new Error('Could not read file'));
+    reader.onload = ()=>{
+      const img = new Image();
+      img.onerror = ()=> reject(new Error('Could not decode image'));
+      img.onload = ()=>{
+        let { width, height } = img;
+        if(width > maxWidth){ height = Math.round(height * (maxWidth / width)); width = maxWidth; }
+        const canvas = document.createElement('canvas');
+        canvas.width = width; canvas.height = height;
+        canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL('image/jpeg', quality));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+function fileToAttachment(file){
+  return new Promise((resolve, reject)=>{
+    if(file.type && file.type.startsWith('image/')){
+      resizeImageToDataUrl(file, 1400, 0.82).then(resolve).catch(reject);
+      return;
+    }
+    if(file.size > 700 * 1024){ reject(new Error('That file is too large — please attach something under 700KB, or a photo/image instead.')); return; }
+    const reader = new FileReader();
+    reader.onerror = ()=> reject(new Error('Could not read file'));
+    reader.onload = ()=> resolve(reader.result);
+    reader.readAsDataURL(file);
+  });
+}
+
+function openHomeworkSubmitModal(hwId){
+  const h = homework.find(x=> x.id === hwId);
+  const existing = myHwSubmissions[hwId];
+  const modal = openModal(`
+    <h3>${existing ? 'Update' : 'Submit'}: ${escapeHtml(h.title)}</h3>
+    <div class="field"><label>Your response</label><textarea id="f-text" rows="4" placeholder="Type your answer here">${existing ? escapeHtml(existing.text || '') : ''}</textarea></div>
+    <div class="field"><label>Attach a file or photo (optional)</label><input id="f-file" type="file" accept="image/*,.pdf,.doc,.docx"></div>
+    ${existing && existing.attachmentUrl ? `<div class="meta">Current file: <a href="${existing.attachmentUrl}" download="${escapeHtml(existing.attachmentName || 'file')}">${escapeHtml(existing.attachmentName || 'attachment')}</a> — choosing a new file replaces it.</div>` : ''}
+    <div class="form-actions"><button class="btn" id="f-cancel">Cancel</button><button class="btn primary" id="f-save">${existing ? 'Update' : 'Submit'}</button></div>
+    <div class="gate-error" id="f-error"></div>
+  `);
+  modal.querySelector('#f-cancel').onclick = ()=> closeModal(modal);
+  modal.querySelector('#f-save').onclick = async ()=>{
+    const text = modal.querySelector('#f-text').value.trim();
+    const file = modal.querySelector('#f-file').files[0];
+    const saveBtn = modal.querySelector('#f-save');
+    const err = modal.querySelector('#f-error');
+    if(!text && !file && !(existing && existing.attachmentUrl)){ err.textContent = 'Add some text or attach a file before submitting.'; return; }
+    saveBtn.disabled = true; saveBtn.textContent = 'Saving…'; err.textContent = '';
+    try{
+      let attachmentUrl = existing ? (existing.attachmentUrl || null) : null;
+      let attachmentName = existing ? (existing.attachmentName || null) : null;
+      if(file){ attachmentUrl = await fileToAttachment(file); attachmentName = file.name; }
+      await db.collection('classes').doc(classId).collection('homework').doc(hwId)
+        .collection('submissions').doc(studentDocId()).set({
+          studentName, text, attachmentUrl, attachmentName,
+          attemptCount: (existing && existing.attemptCount ? existing.attemptCount : 0) + 1,
+          submittedAt: firebase.firestore.FieldValue.serverTimestamp()
+        });
+      closeModal(modal);
+    }catch(e){
+      saveBtn.disabled = false; saveBtn.textContent = existing ? 'Update' : 'Submit';
+      err.textContent = e.message || "Couldn't save — check your connection and try again.";
     }
   };
 }

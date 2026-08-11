@@ -252,13 +252,14 @@ function teardownListeners(){
   if(unsubAnnouncements) unsubAnnouncements();
   if(unsubQuizzes) unsubQuizzes();
   if(unsubBooks) unsubBooks();
+  if(unsubHomework) unsubHomework();
   if(unsubPresence) unsubPresence();
-  unsubAssignments = unsubAnnouncements = unsubQuizzes = unsubBooks = unsubPresence = null;
+  unsubAssignments = unsubAnnouncements = unsubQuizzes = unsubBooks = unsubHomework = unsubPresence = null;
   stopTeacherPresence();
   ClassroomCall.teardown();
   Whiteboard.teardown();
-  assignments = []; announcements = []; quizzes = []; books = []; presence = [];
-  loaded = { assignments: false, announcements: false, quizzes: false, books: false, students: false };
+  assignments = []; announcements = []; quizzes = []; books = []; homework = []; presence = [];
+  loaded = { assignments: false, announcements: false, quizzes: false, books: false, homework: false, students: false };
 }
 
 /* --------------------------- 2. STATE --------------------------- */
@@ -269,13 +270,26 @@ let unsubAssignments = null;
 let unsubAnnouncements = null;
 let unsubQuizzes = null;
 let unsubBooks = null;
+let unsubHomework = null;
 let assignments = [];
 let announcements = [];
 let quizzes = [];
 let books = [];
+let homework = [];
 let presence = [];
 let unsubPresence = null;
-let loaded = { assignments: false, announcements: false, quizzes: false, books: false, students: false };
+let loaded = { assignments: false, announcements: false, quizzes: false, books: false, homework: false, students: false };
+// Homework tab: categories are a fixed field on each doc (not separate
+// collections) so the UI can filter client-side and adding a category later
+// is a one-line change.
+const HOMEWORK_CATEGORIES = [
+  { id:'grammar', label:'Grammar' },
+  { id:'writing', label:'Writing' },
+  { id:'vocab', label:'Vocab' },
+  { id:'spelling', label:'Spelling' },
+  { id:'speech', label:'Speech' }
+];
+let currentHwCategory = 'grammar';
 const PRESENCE_ONLINE_MS = 60000; // no heartbeat within this window = shown offline
 const TEACHER_PRESENCE_ID = '__teacher__';
 let teacherPresenceInterval = null;
@@ -330,6 +344,20 @@ function startApp(id, info){
         quizzes.push(q);
       }
       loaded.quizzes = true;
+      render();
+      markSynced(true);
+    }, ()=> markSynced(false));
+
+  unsubHomework = db.collection('classes').doc(classId).collection('homework')
+    .onSnapshot(async (snap)=>{
+      homework = [];
+      for(const d of snap.docs){
+        const h = { id: d.id, ...d.data() };
+        const subsSnap = await db.collection('classes').doc(classId).collection('homework').doc(d.id).collection('submissions').get();
+        h.submissionCount = subsSnap.size;
+        homework.push(h);
+      }
+      loaded.homework = true;
       render();
       markSynced(true);
     }, ()=> markSynced(false));
@@ -423,7 +451,7 @@ const viewRoot = document.getElementById('view-root');
 
 function render(){
   document.querySelectorAll('.nav-btn').forEach(b=> b.classList.toggle('active', b.dataset.view === currentView));
-  const renderers = { dashboard: renderDashboard, assignments: renderAssignments, announcements: renderAnnouncements, quizzes: renderQuizzes, books: renderBooks, students: renderStudents, whiteboard: renderWhiteboard };
+  const renderers = { dashboard: renderDashboard, assignments: renderAssignments, announcements: renderAnnouncements, homework: renderHomework, quizzes: renderQuizzes, books: renderBooks, students: renderStudents, whiteboard: renderWhiteboard };
   (renderers[currentView] || renderDashboard)();
 }
 
@@ -571,6 +599,59 @@ function renderAnnouncements(){
   viewRoot.innerHTML = html;
   document.getElementById('btn-new-announcement').onclick = openAnnouncementModal;
   viewRoot.querySelectorAll('[data-delete-ann]').forEach(b=> b.onclick = ()=> deleteAnnouncement(b.dataset.deleteAnn));
+}
+
+function renderHomework(){
+  setHeader('Homework', 'Create homework by category and track submissions.');
+  const activeLabel = HOMEWORK_CATEGORIES.find(c=> c.id === currentHwCategory).label;
+  let html = `<div class="pill-tabs">${HOMEWORK_CATEGORIES.map(c=> `<button class="pill-tab ${c.id===currentHwCategory?'active':''}" data-hw-cat="${c.id}">${c.label}</button>`).join('')}</div>`;
+  html += `<div class="section-head"><div></div><button class="btn primary small" id="btn-new-homework">New ${activeLabel.toLowerCase()} homework</button></div>`;
+
+  if(!loaded.homework){
+    html += `<div class="empty"><h3>Loading homework…</h3><p>Connecting to your class.</p></div>`;
+    viewRoot.innerHTML = html;
+    wireHomeworkTabs();
+    document.getElementById('btn-new-homework').onclick = ()=> openHomeworkModal(currentHwCategory);
+    return;
+  }
+
+  const items = homework.filter(h=> h.category === currentHwCategory);
+  if(items.length === 0){
+    html += `<div class="empty"><h3>No ${activeLabel.toLowerCase()} homework yet</h3><p>Create the first one for this category.</p></div>`;
+  }else{
+    [...items].sort((a,b)=> (a.dueDate||'').localeCompare(b.dueDate||'')).forEach(h=>{
+      const status = statusForHomework(h);
+      html += `<div class="card">
+        <div class="card-row">
+          <div>
+            <h3>${escapeHtml(h.title)}</h3>
+            <div class="meta">${h.dueDate ? `Due ${h.dueDate} · ` : 'No due date · '}${h.submissionCount} submitted</div>
+            <p class="body-text">${escapeHtml(h.instructions)}</p>
+            ${h.attachmentUrl ? `<a href="${h.attachmentUrl}" download="${escapeHtml(h.attachmentName || 'attachment')}" class="meta" style="color:var(--forest);text-decoration:underline;">📎 ${escapeHtml(h.attachmentName || 'attachment')}</a>` : ''}
+          </div>
+          <span class="stamp ${status.cls}">${status.label}</span>
+        </div>
+        <div class="form-actions">
+          <button class="btn small" data-hw-review="${h.id}">View submissions</button>
+          <button class="btn small danger" data-hw-delete="${h.id}">Delete</button>
+        </div>
+      </div>`;
+    });
+  }
+  viewRoot.innerHTML = html;
+  wireHomeworkTabs();
+  document.getElementById('btn-new-homework').onclick = ()=> openHomeworkModal(currentHwCategory);
+  viewRoot.querySelectorAll('[data-hw-review]').forEach(b=> b.onclick = ()=> openHomeworkReviewModal(b.dataset.hwReview));
+  viewRoot.querySelectorAll('[data-hw-delete]').forEach(b=> b.onclick = ()=> deleteHomework(b.dataset.hwDelete));
+}
+function wireHomeworkTabs(){
+  viewRoot.querySelectorAll('[data-hw-cat]').forEach(b=> b.onclick = ()=>{ currentHwCategory = b.dataset.hwCat; render(); });
+}
+function statusForHomework(h){
+  const overdue = h.dueDate && new Date(h.dueDate) < new Date(new Date().toDateString());
+  if(h.submissionCount > 0) return { cls:'submitted', label: overdue ? 'in — was due' : 'submissions in' };
+  if(overdue) return { cls:'overdue', label:'overdue' };
+  return { cls:'assigned', label:'open' };
 }
 
 function renderQuizzes(){
@@ -740,6 +821,14 @@ async function deleteAnnouncement(id){
     alert("Couldn't delete this announcement — check your connection and try again.");
   }
 }
+async function deleteHomework(id){
+  if(!confirm('Delete this homework? Any student submissions will be removed too.')) return;
+  try{
+    await db.collection('classes').doc(classId).collection('homework').doc(id).delete();
+  }catch(e){
+    alert("Couldn't delete — check your connection and try again.");
+  }
+}
 async function deleteQuiz(id){
   if(!confirm('Delete this quiz? Student responses to it will no longer be visible.')) return;
   try{
@@ -783,6 +872,70 @@ function closeModal(bg){
   if(!bg) return;
   if(bg._onKey) document.removeEventListener('keydown', bg._onKey);
   bg.remove();
+}
+
+function openHomeworkModal(presetCategory){
+  const modal = openModal(`
+    <h3>New homework</h3>
+    <div class="field"><label>Category</label>
+      <select id="hw-category">${HOMEWORK_CATEGORIES.map(c=> `<option value="${c.id}" ${c.id===presetCategory?'selected':''}>${c.label}</option>`).join('')}</select>
+    </div>
+    <div class="field"><label>Title</label><input id="hw-title" placeholder="Plural nouns worksheet"></div>
+    <div class="field"><label>Instructions</label><textarea id="hw-instr" rows="3" placeholder="What should students do?"></textarea></div>
+    <div class="field"><label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="hw-has-due" style="width:auto;" checked> Has a due date</label>
+      <input id="hw-due" type="date" value="${addDays(7)}">
+    </div>
+    <div class="field"><label>Attach a file (optional)</label><input id="hw-file" type="file" accept="image/*,.pdf,.doc,.docx"></div>
+    <div class="form-actions"><button class="btn" id="f-cancel">Cancel</button><button class="btn primary" id="f-save">Post homework</button></div>
+    <div class="gate-error" id="f-error"></div>
+  `);
+  modal.querySelector('#hw-has-due').onchange = (e)=>{ modal.querySelector('#hw-due').disabled = !e.target.checked; };
+  modal.querySelector('#f-cancel').onclick = ()=> closeModal(modal);
+  modal.querySelector('#f-save').onclick = async ()=>{
+    const title = modal.querySelector('#hw-title').value.trim();
+    const err = modal.querySelector('#f-error');
+    if(!title){ err.textContent = 'Give the homework a title.'; return; }
+    const saveBtn = modal.querySelector('#f-save');
+    saveBtn.disabled = true; saveBtn.textContent = 'Saving…'; err.textContent = '';
+    try{
+      const file = modal.querySelector('#hw-file').files[0];
+      const attachmentUrl = file ? await fileToAttachment(file) : null;
+      const hasDue = modal.querySelector('#hw-has-due').checked;
+      await db.collection('classes').doc(classId).collection('homework').add({
+        category: modal.querySelector('#hw-category').value,
+        title,
+        instructions: modal.querySelector('#hw-instr').value.trim(),
+        dueDate: hasDue ? (modal.querySelector('#hw-due').value || addDays(7)) : null,
+        attachmentName: file ? file.name : null,
+        attachmentUrl,
+        createdAt: firebase.firestore.FieldValue.serverTimestamp()
+      });
+      closeModal(modal);
+    }catch(e){
+      saveBtn.disabled = false; saveBtn.textContent = 'Post homework';
+      err.textContent = e.message || "Couldn't save — check your connection and try again.";
+    }
+  };
+}
+
+async function openHomeworkReviewModal(hwId){
+  const h = homework.find(x=> x.id === hwId);
+  const subsSnap = await db.collection('classes').doc(classId).collection('homework').doc(hwId).collection('submissions').get();
+  const rows = subsSnap.docs.map(d=>{
+    const s = d.data();
+    return `<tr>
+      <td data-label="Student" style="font-weight:600;">${escapeHtml(s.studentName)}</td>
+      <td data-label="Response" class="meta">${escapeHtml(s.text || '(no text)')}${s.attachmentUrl ? ` · <a href="${s.attachmentUrl}" download="${escapeHtml(s.attachmentName || 'file')}">📎 file</a>` : ''}</td>
+      <td data-label="Attempts" class="meta">${s.attemptCount || 1}</td>
+      <td data-label="When" class="meta">${timeAgo(tsVal(s.submittedAt))}</td>
+    </tr>`;
+  }).join('');
+  const modal = openModal(`
+    <h3>Submissions — ${escapeHtml(h ? h.title : '')}</h3>
+    ${subsSnap.empty ? '<p class="meta">No submissions yet.</p>' : `<div style="max-height:320px;overflow:auto;"><table class="sub-table" style="width:100%;font-size:13px;border-collapse:collapse;"><thead><tr><th style="text-align:left;padding:6px;">Student</th><th style="text-align:left;padding:6px;">Response</th><th style="text-align:left;padding:6px;">Attempts</th><th style="text-align:left;padding:6px;">When</th></tr></thead><tbody>${rows}</tbody></table></div>`}
+    <div class="form-actions"><button class="btn" id="f-close">Close</button></div>
+  `);
+  modal.querySelector('#f-close').onclick = ()=> closeModal(modal);
 }
 
 function openAssignmentModal(){
@@ -866,6 +1019,24 @@ async function openReviewModal(assignmentId){
     <div class="form-actions"><button class="btn" id="f-close">Close</button></div>
   `);
   modal.querySelector('#f-close').onclick = ()=> closeModal(modal);
+}
+
+// Turns any uploaded file into a data-URL suitable for storing on a Firestore
+// doc: images get shrunk/compressed via resizeImageToDataUrl; other file
+// types (PDF, Word, etc.) are read raw but capped in size since Firestore
+// documents max out around 1MB.
+function fileToAttachment(file){
+  return new Promise((resolve, reject)=>{
+    if(file.type && file.type.startsWith('image/')){
+      resizeImageToDataUrl(file, 1400, 0.82).then(resolve).catch(reject);
+      return;
+    }
+    if(file.size > 700 * 1024){ reject(new Error('That file is too large — please attach something under 700KB, or a photo/image instead.')); return; }
+    const reader = new FileReader();
+    reader.onerror = ()=> reject(new Error('Could not read file'));
+    reader.onload = ()=> resolve(reader.result);
+    reader.readAsDataURL(file);
+  });
 }
 
 function newQuestionId(){ return 'q' + Math.random().toString(36).slice(2, 10); }
