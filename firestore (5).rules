@@ -1,0 +1,371 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /classes/{classId} {
+      allow read: if true;
+      allow create: if isValidClass(request.resource.data);
+      allow update, delete: if false; // class info is fixed once created
+
+      match /assignments/{assignmentId} {
+        allow read: if true;
+        allow create: if isValidAssignment(request.resource.data);
+        allow update: if false; // teacher deletes + reposts instead of editing
+        allow delete: if true;  // no login system, so any class member can manage assignments
+        match /submissions/{studentId} {
+          allow read: if true;
+          allow create, update: if isValidSubmission(request.resource.data);
+          allow delete: if false; // submissions can't be erased once sent
+        }
+      }
+
+      match /announcements/{announcementId} {
+        allow read: if true;
+        allow create: if isValidAnnouncement(request.resource.data);
+        allow update: if false;
+        allow delete: if true;
+      }
+
+      // ---- homework (grammar/writing/vocab/spelling/speech tabs) ----
+      match /homework/{homeworkId} {
+        allow read: if true;
+        allow create: if isValidHomework(request.resource.data);
+        allow update: if false; // teacher deletes + reposts instead of editing
+        allow delete: if true;  // no login system, so any class member can manage homework
+        match /submissions/{studentId} {
+          allow read: if true;
+          allow create, update: if isValidHomeworkSubmission(request.resource.data);
+          allow delete: if false; // submissions can't be erased once sent
+        }
+      }
+
+      match /quizzes/{quizId} {
+        allow read: if true;
+        allow create: if isValidQuiz(request.resource.data);
+        allow update: if false; // teacher deletes + recreates instead of editing
+        allow delete: if true;
+        match /responses/{studentId} {
+          allow read: if true;
+          allow create, update: if isValidQuizResponse(request.resource.data);
+          allow delete: if false; // responses can't be erased once sent
+        }
+      }
+
+      match /books/{bookId} {
+        allow read: if true;
+        allow create: if isValidBook(request.resource.data);
+        allow update: if isValidBook(request.resource.data); // teacher editing the table of contents
+        allow delete: if true;
+        match /pages/{pageId} {
+          allow read: if true;
+          allow create: if isValidBookPage(request.resource.data);
+          allow update: if false;
+          allow delete: if true;
+        }
+        match /bookmarks/{ownerId} {
+          allow read: if true;
+          allow create, update: if isValidBookmarks(request.resource.data);
+          allow delete: if true;
+        }
+      }
+
+      // ---- video/audio calls (call.js) ----
+      match /calls/{callId} {
+        allow read: if true;
+        allow create: if isValidCallCreate(request.resource.data);
+        // Only status + answer (set by the callee) may change after creation;
+        // who's calling whom is locked once the call doc exists.
+        allow update: if isValidCallUpdate(request.resource.data, resource.data);
+        allow delete: if true; // caller/callee tidy up after hanging up
+
+        match /callerCandidates/{candId} {
+          allow read: if true;
+          allow create: if isValidIceCandidate(request.resource.data);
+          allow update, delete: if false; // ICE candidates are write-once
+        }
+        match /calleeCandidates/{candId} {
+          allow read: if true;
+          allow create: if isValidIceCandidate(request.resource.data);
+          allow update, delete: if false;
+        }
+      }
+
+      // ---- online/last-seen heartbeat (teacher.js / student.js) ----
+      match /presence/{presenceId} {
+        allow read: if true;
+        allow create, update: if isValidPresence(request.resource.data);
+        allow delete: if true;
+      }
+
+      // ---- shared whiteboards (whiteboard.js) ----
+      match /whiteboards/{boardId} {
+        allow read: if true;
+        allow create: if isValidWhiteboardCreate(request.resource.data);
+        // Only the title and updatedAt may change post-creation.
+        allow update: if isValidWhiteboardUpdate(request.resource.data, resource.data);
+        allow delete: if true;
+
+        // ---- v2 object-canvas schema (current) ----
+        // Every placed item — freehand path, shape, text box, image — is
+        // one doc here with a shared x/y/w/h/zIndex envelope so it can be
+        // selected, dragged, and resized uniformly on the client.
+        match /objects/{objectId} {
+          allow read: if true;
+          allow create: if isValidWhiteboardObject(request.resource.data);
+          // type/createdBy/createdByName/createdAt are locked once created;
+          // everything else (position, size, stacking, content, style) can
+          // change as the object is moved, resized, recolored, or edited.
+          allow update: if isValidWhiteboardObject(request.resource.data)
+            && request.resource.data.type == resource.data.type
+            && request.resource.data.createdBy == resource.data.createdBy
+            && request.resource.data.createdByName == resource.data.createdByName
+            && request.resource.data.createdAt == resource.data.createdAt;
+          allow delete: if true; // covers per-item delete, eraser, Undo, and Clear
+        }
+
+        // ---- v1 flattened-stroke schema (legacy, read-only going forward) ----
+        // Kept only so older boards can still be read once for the
+        // one-time client-side migration into /objects. Nothing writes
+        // new strokes here anymore.
+        match /strokes/{strokeId} {
+          allow read: if true;
+          allow create: if isValidStrokeCreate(request.resource.data);
+          allow update: if isValidStrokeUpdate(request.resource.data, resource.data);
+          allow delete: if true; // covers per-board Clear and the one-time migration cleanup
+        }
+
+        // Live pointer positions for the cursor-presence overlay — one doc
+        // per user, overwritten continuously while they draw. Cheap and
+        // disposable, so validation stays light and deletes are always
+        // allowed (a user clears their own dot on pointer-leave/close).
+        match /cursors/{userId} {
+          allow read: if true;
+          allow create, update: if isValidCursor(request.resource.data);
+          allow delete: if true;
+        }
+      }
+    }
+
+    // ---- validation helpers ----
+    function isValidClass(data) {
+      return data.keys().hasAll(['className', 'teacherName', 'code', 'createdAt'])
+        && data.className is string && data.className.size() > 0 && data.className.size() < 120
+        && data.teacherName is string && data.teacherName.size() > 0 && data.teacherName.size() < 80
+        && data.code is string && data.code.size() == 6;
+    }
+    function isValidAssignment(data) {
+      return data.keys().hasAll(['title', 'instructions', 'dueDate', 'createdAt'])
+        && data.title is string && data.title.size() > 0 && data.title.size() < 150
+        && data.instructions is string && data.instructions.size() < 3000
+        && data.dueDate is string && data.dueDate.size() < 20;
+    }
+    function isValidSubmission(data) {
+      return data.keys().hasAll(['studentName', 'text', 'submittedAt'])
+        && data.studentName is string && data.studentName.size() > 0 && data.studentName.size() < 80
+        && data.text is string && data.text.size() < 5000;
+    }
+    function isValidAnnouncement(data) {
+      return data.keys().hasAll(['title', 'body', 'postedAt'])
+        && data.title is string && data.title.size() > 0 && data.title.size() < 150
+        && data.body is string && data.body.size() < 3000;
+    }
+    function isValidHomework(data) {
+      return data.keys().hasAll(['category', 'title', 'instructions', 'dueDate', 'createdAt'])
+        && data.category in ['grammar', 'writing', 'vocab', 'spelling', 'speech']
+        && data.title is string && data.title.size() > 0 && data.title.size() < 150
+        && data.instructions is string && data.instructions.size() < 3000
+        && (data.dueDate == null || (data.dueDate is string && data.dueDate.size() < 20))
+        && (!('attachmentName' in data) || data.attachmentName == null || (data.attachmentName is string && data.attachmentName.size() < 200))
+        && (!('attachmentUrl' in data) || data.attachmentUrl == null || (data.attachmentUrl is string && data.attachmentUrl.size() <= 1000000))
+        && (!('mode' in data) || data.mode in ['prompt', 'questions'])
+        && (!('questions' in data) || isValidHomeworkQuestions(data.questions));
+    }
+    function isValidHomeworkQuestions(list) {
+      return list is list && list.size() > 0 && list.size() <= 50
+        && list.filter(q, isValidHomeworkQuestion(q)).size() == list.size();
+    }
+    function isValidHomeworkQuestion(q) {
+      return q is map && q.keys().hasAll(['id', 'text'])
+        && q.id is string && q.id.size() > 0 && q.id.size() < 40
+        && q.text is string && q.text.size() > 0 && q.text.size() < 500;
+    }
+    function isValidHomeworkSubmission(data) {
+      return data.keys().hasAll(['studentName', 'text', 'attemptCount', 'submittedAt'])
+        && data.studentName is string && data.studentName.size() > 0 && data.studentName.size() < 80
+        && data.text is string && data.text.size() < 20000
+        && data.attemptCount is int && data.attemptCount > 0
+        && (!('attachmentName' in data) || data.attachmentName == null || (data.attachmentName is string && data.attachmentName.size() < 200))
+        && (!('attachmentUrl' in data) || data.attachmentUrl == null || (data.attachmentUrl is string && data.attachmentUrl.size() <= 1000000))
+        && (!('answers' in data) || (data.answers is map && data.answers.size() <= 50));
+    }
+    function isValidQuiz(data) {
+      return data.keys().hasAll(['title', 'questions', 'createdAt'])
+        && data.title is string && data.title.size() > 0 && data.title.size() < 150
+        && data.questions is list && data.questions.size() > 0;
+    }
+    function isValidQuizResponse(data) {
+      return data.keys().hasAll(['studentName', 'answers'])
+        && data.studentName is string && data.studentName.size() > 0 && data.studentName.size() < 80
+        && data.answers is map;
+    }
+    function isValidBook(data) {
+      return data.keys().hasAll(['title', 'pageCount', 'toc', 'createdAt'])
+        && data.title is string && data.title.size() > 0 && data.title.size() < 150
+        && data.pageCount is int && data.pageCount > 0 && data.pageCount <= 300
+        && data.toc is list;
+    }
+    function isValidBookPage(data) {
+      return data.keys().hasAll(['index', 'dataUrl'])
+        && data.index is int && data.index > 0
+        && data.dataUrl is string && data.dataUrl.size() > 0;
+    }
+    function isValidBookmarks(data) {
+      return data.keys().hasAll(['items'])
+        && data.items is list;
+    }
+
+    function isValidCallCreate(data) {
+      return data.keys().hasAll(['callerId', 'callerName', 'calleeId', 'calleeName', 'offer', 'status', 'createdAt'])
+        && data.callerId is string && data.callerId.size() > 0
+        && data.callerName is string && data.callerName.size() > 0 && data.callerName.size() < 80
+        && data.calleeId is string && data.calleeId.size() > 0
+        && data.calleeName is string && data.calleeName.size() > 0 && data.calleeName.size() < 80
+        && data.offer is map && data.offer.type is string && data.offer.sdp is string
+        && data.status == 'ringing';
+    }
+    function isValidCallUpdate(next, prev) {
+      return next.callerId == prev.callerId
+        && next.calleeId == prev.calleeId
+        && next.status is string
+        && next.status in ['ringing', 'active', 'reconnecting', 'declined', 'missed', 'ended']
+        && (!('answer' in next) || (next.answer is map && next.answer.type is string && next.answer.sdp is string))
+        && (!('restartOffer' in next) || (next.restartOffer is map && next.restartOffer.type is string && next.restartOffer.sdp is string))
+        && (!('restartAnswer' in next) || (next.restartAnswer is map && next.restartAnswer.type is string && next.restartAnswer.sdp is string))
+        && (!('restartSeq' in next) || next.restartSeq is int)
+        && (!('answeredAt' in next) || next.answeredAt != null)
+        && (!('endedAt' in next) || next.endedAt != null);
+    }
+    function isValidIceCandidate(data) {
+      return data.keys().size() > 0 && data.keys().size() < 20; // ICE candidate JSON shape varies by browser
+    }
+    function isValidPresence(data) {
+      return data.role in ['teacher', 'student']
+        && data.lastSeen != null
+        && ((data.role == 'teacher' && data.name is string && data.name.size() > 0 && data.name.size() < 80)
+            || (data.role == 'student' && data.studentName is string && data.studentName.size() > 0 && data.studentName.size() < 80));
+    }
+    function isValidWhiteboardCreate(data) {
+      return data.keys().hasAll(['title', 'createdBy', 'createdByName', 'createdAt', 'updatedAt'])
+        && data.title is string && data.title.size() > 0 && data.title.size() < 150
+        && data.createdBy is string && data.createdBy.size() > 0
+        && data.createdByName is string && data.createdByName.size() > 0 && data.createdByName.size() < 80;
+    }
+    function isValidWhiteboardUpdate(next, prev) {
+      return next.createdBy == prev.createdBy
+        && next.title is string && next.title.size() > 0 && next.title.size() < 150;
+    }
+
+    // A v2 whiteboard object is one of four kinds. All kinds share the same
+    // positioning envelope; the extra required fields depend on `type`.
+    function isValidWhiteboardObject(data) {
+      return data.keys().hasAll(['type', 'x', 'y', 'w', 'h', 'zIndex', 'createdBy', 'createdByName', 'createdAt', 'updatedAt'])
+        && data.type in ['path', 'shape', 'text', 'image']
+        && data.x is number && data.x >= -1 && data.x <= 1601
+        && data.y is number && data.y >= -1 && data.y <= 901
+        && data.w is number && data.w > 0 && data.w <= 1601
+        && data.h is number && data.h > 0 && data.h <= 901
+        && data.zIndex is number
+        && data.createdBy is string && data.createdBy.size() > 0
+        && data.createdByName is string && data.createdByName.size() > 0 && data.createdByName.size() < 80
+        && (
+          (data.type == 'path' && isValidWbPath(data))
+          || (data.type == 'shape' && isValidWbShape(data))
+          || (data.type == 'text' && isValidWbText(data))
+          || (data.type == 'image' && isValidWbImage(data))
+        );
+    }
+    function isValidWbNormPoint(p) {
+      return p is map && p.x is number && p.x >= -0.05 && p.x <= 1.05
+        && p.y is number && p.y >= -0.05 && p.y <= 1.05;
+    }
+    function isValidWbPath(data) {
+      return data.keys().hasAll(['points', 'color', 'size'])
+        && data.points is list && data.points.size() >= 2 && data.points.size() <= 3000
+        && data.color is string && data.color.size() <= 10
+        && data.size is number && data.size > 0 && data.size <= 40;
+    }
+    function isValidWbShape(data) {
+      return data.keys().hasAll(['shapeType', 'color', 'size', 'flipX', 'flipY'])
+        && data.shapeType in ['line', 'arrow', 'rect', 'circle', 'triangle']
+        && data.color is string && data.color.size() <= 10
+        && data.size is number && data.size > 0 && data.size <= 40
+        && data.flipX is bool && data.flipY is bool;
+    }
+    function isValidWbText(data) {
+      return data.keys().hasAll(['html', 'color', 'fontFamily', 'fontPx', 'bold', 'italic'])
+        && data.html is string && data.html.size() <= 6000
+        && data.color is string && data.color.size() <= 10
+        && data.fontFamily is string && data.fontFamily.size() <= 60
+        && data.fontPx is number && data.fontPx > 0 && data.fontPx <= 200
+        && data.bold is bool && data.italic is bool;
+    }
+    function isValidWbImage(data) {
+      return data.keys().hasAll(['src'])
+        && data.src is string && data.src.size() > 0 && data.src.size() <= 1400000; // ~1MB base64, under the 1MiB doc cap
+    }
+
+    // A v1 (legacy) whiteboard "stroke" doc is one of several shapes
+    // depending on tool. Read-only in practice now — kept so existing
+    // boards can be migrated into /objects the first time they're opened.
+    function isValidStrokeCreate(data) {
+      return data.keys().hasAll(['color', 'tool', 'createdBy', 'createdByName', 'createdAt', 'done'])
+        && data.color is string && data.color.size() <= 10
+        && data.tool in ['pen', 'eraser', 'text', 'line', 'arrow', 'rect', 'circle', 'triangle']
+        && data.createdBy is string && data.createdBy.size() > 0
+        && data.createdByName is string && data.createdByName.size() > 0 && data.createdByName.size() < 80
+        && data.done is bool
+        && (
+          (data.tool in ['pen', 'eraser'] && isValidPenPoints(data))
+          || (data.tool == 'text' && isValidTextFields(data))
+          || (data.tool in ['line', 'arrow', 'rect', 'circle', 'triangle'] && isValidShapeFields(data))
+        );
+    }
+    function isValidPenPoints(data) {
+      return data.keys().hasAll(['size', 'points'])
+        && data.size is number && data.size > 0 && data.size <= 40
+        && data.points is list && data.points.size() <= 2000;
+    }
+    function isValidPoint(p) {
+      return p is map && p.x is number && p.y is number;
+    }
+    function isValidTextFields(data) {
+      return data.keys().hasAll(['point', 'text', 'fontPx', 'fontFamily', 'bold', 'italic', 'center'])
+        && isValidPoint(data.point)
+        && data.text is string && data.text.size() > 0 && data.text.size() <= 500
+        && data.fontPx is number && data.fontPx > 0 && data.fontPx <= 200
+        && data.fontFamily is string && data.fontFamily.size() <= 60
+        && data.bold is bool && data.italic is bool && data.center is bool;
+    }
+    function isValidShapeFields(data) {
+      return data.keys().hasAll(['size', 'start', 'end'])
+        && data.size is number && data.size > 0 && data.size <= 40
+        && isValidPoint(data.start) && isValidPoint(data.end);
+    }
+    function isValidStrokeUpdate(next, prev) {
+      return next.createdBy == prev.createdBy
+        && next.color == prev.color
+        && next.tool == prev.tool
+        && next.done is bool
+        && (
+          prev.tool in ['pen', 'eraser']
+            ? (next.size == prev.size && next.points is list && next.points.size() <= 2000)
+            : next.keys() == prev.keys()
+        );
+    }
+    function isValidCursor(data) {
+      return data.keys().hasAll(['name', 'x', 'y', 'color', 'updatedAt'])
+        && data.name is string && data.name.size() > 0 && data.name.size() < 80
+        && data.x is number && data.y is number
+        && data.color is string && data.color.size() <= 10;
+    }
+  }
+}

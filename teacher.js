@@ -261,6 +261,7 @@ function teardownListeners(){
   assignments = []; announcements = []; quizzes = []; books = []; homework = []; presence = [];
   loaded = { assignments: false, announcements: false, quizzes: false, books: false, homework: false, students: false };
   showNewHwForm = false; hwResponsesExpanded = {};
+  showNewGrammarForm = false;
 }
 
 /* --------------------------- 2. STATE --------------------------- */
@@ -282,19 +283,28 @@ let unsubPresence = null;
 let loaded = { assignments: false, announcements: false, quizzes: false, books: false, homework: false, students: false };
 // Homework tab: categories are a fixed field on each doc (not separate
 // collections) so the UI can filter client-side and adding a category later
-// is a one-line change.
+// is a one-line change. `style` controls which renderer/wiring a category
+// uses — add a category by giving it an id/label and reusing one of the
+// three existing styles (or add a new style + its renderer if you need a
+// genuinely different layout).
+//   'builder' -> renderGrammarTeacherView / wireGrammarTeacherView (prompt / questions / worksheet-import)
+//   'writing' -> renderWritingTeacherView / wireWritingTeacherView (inline free response)
+//   'generic' -> the plain popup-modal flow (openHomeworkModal)
 const HOMEWORK_CATEGORIES = [
-  { id:'grammar', label:'Grammar' },
-  { id:'writing', label:'Writing' },
-  { id:'vocab', label:'Vocab' },
-  { id:'spelling', label:'Spelling' },
-  { id:'speech', label:'Speech' }
+  { id:'grammar', label:'Grammar', style:'builder' },
+  { id:'writing', label:'Writing', style:'writing' },
+  { id:'vocab', label:'Vocab', style:'builder' },
+  { id:'spelling', label:'Spelling', style:'generic' },
+  { id:'speech', label:'Speech', style:'generic' }
 ];
 let currentHwCategory = 'grammar';
 // Inline "Writing" tab state (see renderWritingTeacherView): whether the new-
 // prompt form is open, and which prompts have their responses expanded.
 let showNewHwForm = false;
 let hwResponsesExpanded = {};
+// Inline "Grammar"/"Vocab" ('builder' style) state (see renderGrammarTeacherView):
+// whether the new-homework form is open. Responses reuse hwResponsesExpanded above.
+let showNewGrammarForm = false;
 const PRESENCE_ONLINE_MS = 60000; // no heartbeat within this window = shown offline
 const TEACHER_PRESENCE_ID = '__teacher__';
 let teacherPresenceInterval = null;
@@ -608,7 +618,8 @@ function renderAnnouncements(){
 
 function renderHomework(){
   setHeader('Homework', 'Create homework by category and track submissions.');
-  const activeLabel = HOMEWORK_CATEGORIES.find(c=> c.id === currentHwCategory).label;
+  const catMeta = HOMEWORK_CATEGORIES.find(c=> c.id === currentHwCategory);
+  const activeLabel = catMeta.label;
   let html = `<div class="pill-tabs">${HOMEWORK_CATEGORIES.map(c=> `<button class="pill-tab ${c.id===currentHwCategory?'active':''}" data-hw-cat="${c.id}">${c.label}</button>`).join('')}</div>`;
 
   if(!loaded.homework){
@@ -620,11 +631,19 @@ function renderHomework(){
 
   const items = homework.filter(h=> h.category === currentHwCategory);
 
-  if(currentHwCategory === 'writing'){
+  if(catMeta.style === 'writing'){
     html += renderWritingTeacherView(items);
     viewRoot.innerHTML = html;
     wireHomeworkTabs();
     wireWritingTeacherView();
+    return;
+  }
+
+  if(catMeta.style === 'builder'){
+    html += renderGrammarTeacherView(items, currentHwCategory);
+    viewRoot.innerHTML = html;
+    wireHomeworkTabs();
+    wireGrammarTeacherView(currentHwCategory);
     return;
   }
 
@@ -665,6 +684,26 @@ function statusForHomework(h){
   if(h.submissionCount > 0) return { cls:'submitted', label: overdue ? 'in — was due' : 'submissions in' };
   if(overdue) return { cls:'overdue', label:'overdue' };
   return { cls:'assigned', label:'open' };
+}
+
+// Auto-grades a worksheet submission against each item's optional
+// correctAnswer. Case/whitespace-insensitive; mc compares the chosen option
+// text directly. Items with no correctAnswer set are left "ungraded" rather
+// than counted wrong, since the teacher may not have filled one in.
+function normalizeAnswer(v){ return (v || '').toString().trim().toLowerCase().replace(/\s+/g,' '); }
+function gradeWorksheetItem(item, given){
+  if(!item.correctAnswer) return 'ungraded';
+  if(!given) return 'wrong';
+  return normalizeAnswer(given) === normalizeAnswer(item.correctAnswer) ? 'correct' : 'wrong';
+}
+function scoreWorksheetSubmission(h, answers){
+  const items = h.items || [];
+  let correct = 0, gradable = 0;
+  items.forEach(it=>{
+    const g = gradeWorksheetItem(it, answers && answers[it.id]);
+    if(g !== 'ungraded'){ gradable++; if(g === 'correct') correct++; }
+  });
+  return { correct, gradable, total: items.length };
 }
 
 /* Writing tab: prompts are created inline (no popup) and each prompt's
@@ -764,6 +803,404 @@ async function toggleWritingResponses(hwId){
     html += `<div style="border-top:0.5px solid var(--line);padding-top:10px;">
       <div style="display:flex;justify-content:space-between;gap:10px;"><strong style="font-size:13px;">${escapeHtml(s.studentName)}</strong><span class="meta">attempt ${s.attemptCount || 1} · ${timeAgo(tsVal(s.submittedAt))}</span></div>
       ${s.text ? `<p class="body-text" style="white-space:pre-wrap;margin-top:6px;">${escapeHtml(s.text)}</p>` : '<p class="meta" style="margin-top:6px;">(no typed text)</p>'}
+      ${s.attachmentUrl ? `<a href="${s.attachmentUrl}" download="${escapeHtml(s.attachmentName || 'file')}" class="meta">📎 ${escapeHtml(s.attachmentName || 'attached file')}</a>` : ''}
+    </div>`;
+  });
+  html += '</div>';
+  container.innerHTML = html;
+}
+
+// ---- Grammar tab: teacher can post either a single free-response prompt
+// (like Writing) or a numbered list of short questions students answer
+// inline. Both live in the same `homework` doc via the `mode` field. ----
+function renderGrammarTeacherView(items, category){
+  const catLabel = (HOMEWORK_CATEGORIES.find(c=> c.id === category) || {}).label || 'homework';
+  let html = `<div class="section-head"><div></div><button class="btn primary small" id="btn-toggle-grammar-form">${showNewGrammarForm ? 'Cancel' : `New ${catLabel.toLowerCase()} homework`}</button></div>`;
+
+  if(showNewGrammarForm){
+    html += `<div class="card">
+      <div class="field"><label>Format</label>
+        <select id="gr-mode">
+          <option value="prompt">Single prompt — student writes a general response</option>
+          <option value="questions">List of questions — student answers each one</option>
+          <option value="worksheet">Import from PDF — auto-build fill-in-the-blank / multiple choice questions</option>
+        </select>
+      </div>
+      <div class="field"><label>Title</label><input id="gr-title" placeholder="Subject-verb agreement"></div>
+      <div class="field" id="gr-instr-wrap"><label>Instructions / prompt</label><textarea id="gr-instr" rows="3" placeholder="What should students do?"></textarea></div>
+      <div class="field hidden" id="gr-questions-wrap">
+        <label>Questions</label>
+        <div id="gr-questions-list"></div>
+        <button class="btn small" type="button" id="gr-add-question">+ Add question</button>
+      </div>
+      <div class="field hidden" id="gr-worksheet-wrap">
+        <label>Import a worksheet PDF</label>
+        <p class="meta" style="margin:0 0 8px;">Works best on typed PDFs (like a worksheet made in Word/Google Docs). It pulls out numbered items, detects blanks ( ___ ) and multiple-choice options (A/B/C/D), and turns them into editable questions below — nothing posts until you review and save. Scanned or handwritten pages usually won't extract cleanly; you'll still see a page image to work from and can type the questions in by hand.</p>
+        <input type="file" id="gr-ws-file" accept="application/pdf">
+        <button type="button" class="btn small" id="gr-ws-extract" style="margin-top:8px;">Extract questions</button>
+        <p class="meta" id="gr-ws-status" style="margin-top:8px;"></p>
+        <div id="gr-ws-page-preview"></div>
+        <div id="gr-ws-items" style="margin-top:10px;"></div>
+        <button type="button" class="btn small hidden" id="gr-ws-add-item" style="margin-top:6px;">+ Add question manually</button>
+      </div>
+      <div class="field"><label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="gr-has-due" style="width:auto;" checked> Has a due date</label>
+        <input id="gr-due" type="date" value="${addDays(7)}">
+      </div>
+      <div class="field" id="gr-file-wrap"><label>Attach a file (optional)</label><input id="gr-file" type="file" accept="image/*,.pdf,.doc,.docx"></div>
+      <div class="form-actions"><button class="btn small" id="gr-cancel">Cancel</button><button class="btn primary small" id="gr-save">Post homework</button></div>
+      <div class="gate-error" id="gr-error"></div>
+    </div>`;
+  }
+
+  if(items.length === 0){
+    html += `<div class="empty"><h3>No ${catLabel.toLowerCase()} homework yet</h3><p>Create the first one for this category.</p></div>`;
+  }else{
+    [...items].sort((a,b)=> (a.dueDate||'').localeCompare(b.dueDate||'')).forEach(h=>{
+      const status = statusForHomework(h);
+      const expanded = !!hwResponsesExpanded[h.id];
+      const isQ = h.mode === 'questions';
+      const isWs = h.mode === 'worksheet';
+      const formatLabel = isQ ? `${(h.questions||[]).length} question${(h.questions||[]).length===1?'':'s'}` : isWs ? `${(h.items||[]).length} question${(h.items||[]).length===1?'':'s'} · from PDF` : 'single prompt';
+      html += `<div class="card">
+        <div class="card-row">
+          <div>
+            <h3>${escapeHtml(h.title)}</h3>
+            <div class="meta">${h.dueDate ? `Due ${h.dueDate} · ` : 'No due date · '}${h.submissionCount} submitted · ${formatLabel}</div>
+            ${h.instructions ? `<p class="body-text">${escapeHtml(h.instructions)}</p>` : ''}
+            ${isQ ? `<ol style="margin:6px 0 0;padding-left:18px;font-size:13px;color:var(--forest);">${(h.questions||[]).map(q=> `<li>${escapeHtml(q.text)}</li>`).join('')}</ol>` : ''}
+            ${isWs ? `<ol style="margin:6px 0 0;padding-left:18px;font-size:13px;color:var(--forest);">${(h.items||[]).map(it=> `<li>${escapeHtml((it.stem||'').replace('{{blank}}','____'))}</li>`).join('')}</ol>` : ''}
+            ${isWs && h.attachmentUrl ? `<img src="${h.attachmentUrl}" style="max-width:180px;border-radius:8px;border:0.5px solid var(--line);margin-top:8px;display:block;">` : ''}
+            ${!isWs && h.attachmentUrl ? `<a href="${h.attachmentUrl}" download="${escapeHtml(h.attachmentName || 'attachment')}" class="meta" style="color:var(--forest);text-decoration:underline;">📎 ${escapeHtml(h.attachmentName || 'attachment')}</a>` : ''}
+          </div>
+          <span class="stamp ${status.cls}">${status.label}</span>
+        </div>
+        <div class="form-actions">
+          <button class="btn small" data-gr-toggle="${h.id}">${expanded ? 'Hide responses' : 'View responses'}</button>
+          <button class="btn small danger" data-hw-delete="${h.id}">Delete</button>
+        </div>
+        <div id="gr-responses-${h.id}">${expanded ? '<p class="meta" style="margin-top:10px;">Loading…</p>' : ''}</div>
+      </div>`;
+    });
+  }
+  return html;
+}
+
+function wireGrammarTeacherView(category){
+  document.getElementById('btn-toggle-grammar-form').onclick = ()=>{ showNewGrammarForm = !showNewGrammarForm; render(); };
+
+  if(showNewGrammarForm){
+    const modeSel = document.getElementById('gr-mode');
+    const instrLabel = document.querySelector('#gr-instr-wrap label');
+    const qWrap = document.getElementById('gr-questions-wrap');
+    const qList = document.getElementById('gr-questions-list');
+    const wsWrap = document.getElementById('gr-worksheet-wrap');
+    const fileWrap = document.getElementById('gr-file-wrap');
+
+    // Worksheet-mode builder state. Lives in this closure (like the quiz
+    // builder modal) rather than module state, since the form is rebuilt
+    // fresh every time it's opened.
+    let wsItems = [];
+    let wsPageImage = null;
+
+    function addQuestionRow(){
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;gap:6px;margin-bottom:6px;';
+      row.innerHTML = `<input type="text" class="gr-question-input" placeholder="e.g. Circle the verb: The dog runs fast." style="flex:1;"><button type="button" class="btn small danger">✕</button>`;
+      row.querySelector('button').onclick = ()=> row.remove();
+      qList.appendChild(row);
+    }
+
+    function newWsItem(type){ return { id: newQuestionId(), type: type || 'blank', stem: '', options: ['', ''], correctAnswer: '' }; }
+
+    function wsOptionsHtml(item){
+      const opts = (item.options && item.options.length) ? item.options : ['', ''];
+      return `<div class="field"><label>Options</label>
+        ${opts.map((o,i)=> `<input class="opt-input" data-ws-opt="${item.id}" data-opt-index="${i}" value="${escapeHtml(o)}" placeholder="Option ${i+1}">`).join('')}
+        <button type="button" class="btn small" data-ws-addopt="${item.id}">Add option</button></div>`;
+    }
+
+    function wsItemRowHtml(item, idx){
+      const isMc = item.type === 'mc';
+      const isBlank = item.type === 'blank';
+      return `<div class="qbuilder-row" data-wsrow="${item.id}">
+        <button type="button" class="btn small danger" data-ws-remove="${item.id}">Remove</button>
+        <div class="meta" style="margin-bottom:8px;font-weight:700;">Question ${idx + 1}</div>
+        <div class="field"><label>Type</label>
+          <select data-ws-type="${item.id}">
+            <option value="blank" ${isBlank ? 'selected' : ''}>Fill in the blank</option>
+            <option value="short" ${item.type === 'short' ? 'selected' : ''}>Short answer</option>
+            <option value="mc" ${isMc ? 'selected' : ''}>Multiple choice</option>
+          </select>
+        </div>
+        <div class="field"><label>${isBlank ? 'Sentence — write ___ where the blank goes' : 'Question text'}</label>
+          <textarea rows="2" data-ws-stem="${item.id}" placeholder="${isBlank ? 'The dog ___ (run) fast.' : 'What is a noun?'}">${escapeHtml(item.stem)}</textarea>
+        </div>
+        <div data-ws-options-wrap="${item.id}">${isMc ? wsOptionsHtml(item) : ''}</div>
+        <div class="field"><label>Correct answer${isMc ? ' (must exactly match one option above)' : ''} (optional — for your reference)</label>
+          <input data-ws-correct="${item.id}" value="${escapeHtml(item.correctAnswer || '')}" placeholder="${isMc ? 'Copy the correct option exactly' : 'e.g. runs'}">
+        </div>
+      </div>`;
+    }
+
+    function syncWsFromDom(){
+      wsItems.forEach(item=>{
+        const row = document.querySelector(`[data-wsrow="${item.id}"]`);
+        if(!row) return;
+        item.type = row.querySelector(`[data-ws-type="${item.id}"]`).value;
+        item.stem = row.querySelector(`[data-ws-stem="${item.id}"]`).value;
+        item.correctAnswer = row.querySelector(`[data-ws-correct="${item.id}"]`).value.trim();
+        if(item.type === 'mc'){
+          item.options = Array.from(row.querySelectorAll(`[data-ws-opt="${item.id}"]`)).map(i=> i.value.trim());
+        }
+      });
+    }
+
+    function renderWsBuilder(){
+      const wrap = document.getElementById('gr-ws-items');
+      if(!wrap) return;
+      wrap.innerHTML = wsItems.map((it,i)=> wsItemRowHtml(it, i)).join('');
+      document.getElementById('gr-ws-add-item').classList.toggle('hidden', wsItems.length === 0);
+      wrap.querySelectorAll('[data-ws-remove]').forEach(btn=>{
+        btn.onclick = ()=>{ syncWsFromDom(); wsItems = wsItems.filter(x=> x.id !== btn.dataset.wsRemove); renderWsBuilder(); };
+      });
+      wrap.querySelectorAll('[data-ws-type]').forEach(sel=>{
+        sel.onchange = ()=>{
+          syncWsFromDom();
+          const item = wsItems.find(x=> x.id === sel.dataset.wsType);
+          item.type = sel.value;
+          if(item.type === 'mc' && (!item.options || item.options.length < 2)) item.options = ['', ''];
+          renderWsBuilder();
+        };
+      });
+      wrap.querySelectorAll('[data-ws-addopt]').forEach(btn=>{
+        btn.onclick = ()=>{ syncWsFromDom(); const item = wsItems.find(x=> x.id === btn.dataset.wsAddopt); item.options.push(''); renderWsBuilder(); };
+      });
+    }
+
+    modeSel.onchange = ()=>{
+      const isQ = modeSel.value === 'questions';
+      const isWs = modeSel.value === 'worksheet';
+      qWrap.classList.toggle('hidden', !isQ);
+      wsWrap.classList.toggle('hidden', !isWs);
+      fileWrap.classList.toggle('hidden', isWs); // worksheet mode uses the PDF itself, not a separate attachment
+      instrLabel.textContent = isQ ? 'Instructions (optional)' : (isWs ? 'Instructions (optional)' : 'Instructions / prompt');
+      if(isQ && qList.children.length === 0) addQuestionRow();
+    };
+    document.getElementById('gr-add-question').onclick = addQuestionRow;
+    document.getElementById('gr-has-due').onchange = (e)=>{ document.getElementById('gr-due').disabled = !e.target.checked; };
+    document.getElementById('gr-cancel').onclick = ()=>{ showNewGrammarForm = false; render(); };
+
+    document.getElementById('gr-ws-extract').onclick = async ()=>{
+      const file = document.getElementById('gr-ws-file').files[0];
+      const status = document.getElementById('gr-ws-status');
+      if(!file){ status.textContent = 'Choose a PDF first.'; return; }
+      const extractBtn = document.getElementById('gr-ws-extract');
+      extractBtn.disabled = true;
+      status.textContent = 'Reading PDF…';
+      try{
+        const buf = await file.arrayBuffer();
+        const pdf = await pdfjsLib.getDocument({
+          data: buf,
+          cMapUrl: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/cmaps/',
+          cMapPacked: true,
+          standardFontDataUrl: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/standard_fonts/',
+          stopAtErrors: false
+        }).promise;
+        let fullText = '';
+        const pagesToRead = Math.min(pdf.numPages, 20);
+        for(let i = 1; i <= pagesToRead; i++){
+          status.textContent = `Reading page ${i} of ${pagesToRead}…`;
+          const page = await pdf.getPage(i);
+          const content = await page.getTextContent();
+          fullText += content.items.map(it=> it.str).join(' ') + '\n';
+        }
+        // A page image (with any figures/photos on it) so the teacher — and
+        // later the student — has visual context text extraction can't capture.
+        wsPageImage = await pdfPageToDataUrl(pdf, 1, 900);
+        document.getElementById('gr-ws-page-preview').innerHTML =
+          `<img src="${wsPageImage}" style="max-width:260px;border-radius:8px;border:0.5px solid var(--line);margin:8px 0;display:block;">`;
+
+        const parsed = parseWorksheetText(fullText);
+        wsItems = parsed.length ? parsed : [newWsItem()];
+        status.textContent = parsed.length
+          ? `Found ${parsed.length} question${parsed.length === 1 ? '' : 's'} — review and edit before posting.`
+          : `Couldn't auto-detect questions on this file — it may be scanned or handwritten. Use the page image above as reference and add questions manually.`;
+        renderWsBuilder();
+      }catch(e){
+        console.error(e);
+        document.getElementById('gr-ws-status').textContent = "Couldn't read that PDF. Try a different file, or add questions manually below.";
+        wsItems = wsItems.length ? wsItems : [newWsItem()];
+        renderWsBuilder();
+      }finally{
+        extractBtn.disabled = false;
+      }
+    };
+    document.getElementById('gr-ws-add-item').onclick = ()=>{ syncWsFromDom(); wsItems.push(newWsItem()); renderWsBuilder(); };
+
+    document.getElementById('gr-save').onclick = async ()=>{
+      const title = document.getElementById('gr-title').value.trim();
+      const err = document.getElementById('gr-error');
+      const mode = modeSel.value;
+      let questions = [];
+      let wsItemsToSave = [];
+      if(mode === 'questions'){
+        questions = Array.from(qList.querySelectorAll('.gr-question-input'))
+          .map(inp=> inp.value.trim()).filter(Boolean)
+          .map(text=> ({ id: newQuestionId(), text }));
+        if(questions.length === 0){ err.textContent = 'Add at least one question, or switch to single prompt.'; return; }
+      }
+      if(mode === 'worksheet'){
+        syncWsFromDom();
+        wsItemsToSave = wsItems
+          .map(it=>{
+            const item = { id: it.id, type: it.type, stem: it.stem.trim(), correctAnswer: it.correctAnswer || '' };
+            if(item.type === 'mc'){
+              item.options = (it.options || []).map(o=> o.trim()).filter(Boolean);
+              if(item.options.length < 2) item.type = 'short'; // not enough real options — fall back gracefully
+            }
+            return item;
+          })
+          .filter(it=> it.stem);
+        if(wsItemsToSave.length === 0){ err.textContent = 'Extract or add at least one question before posting.'; return; }
+      }
+      if(!title){ err.textContent = 'Give the homework a title.'; return; }
+      const saveBtn = document.getElementById('gr-save');
+      saveBtn.disabled = true; saveBtn.textContent = 'Saving…'; err.textContent = '';
+      try{
+        const hasDue = document.getElementById('gr-has-due').checked;
+        let attachmentUrl = null;
+        let attachmentName = null;
+        if(mode === 'worksheet'){
+          attachmentUrl = wsPageImage;
+          attachmentName = 'worksheet-page-1.jpg';
+        }else{
+          const file = document.getElementById('gr-file').files[0];
+          attachmentUrl = file ? await fileToAttachment(file) : null;
+          attachmentName = file ? file.name : null;
+        }
+        const doc = {
+          category,
+          mode,
+          title,
+          instructions: document.getElementById('gr-instr').value.trim(),
+          dueDate: hasDue ? (document.getElementById('gr-due').value || addDays(7)) : null,
+          attachmentName,
+          attachmentUrl,
+          createdAt: firebase.firestore.FieldValue.serverTimestamp()
+        };
+        if(mode === 'questions') doc.questions = questions;
+        if(mode === 'worksheet') doc.items = wsItemsToSave;
+        await db.collection('classes').doc(classId).collection('homework').add(doc);
+        showNewGrammarForm = false;
+        render();
+      }catch(e){
+        saveBtn.disabled = false; saveBtn.textContent = 'Post homework';
+        err.textContent = e.message || "Couldn't save — check your connection and try again.";
+      }
+    };
+  }
+
+  viewRoot.querySelectorAll('[data-gr-toggle]').forEach(b=> b.onclick = ()=> toggleGrammarResponses(b.dataset.grToggle));
+  viewRoot.querySelectorAll('[data-hw-delete]').forEach(b=> b.onclick = ()=> deleteHomework(b.dataset.hwDelete));
+}
+
+// Heuristic PDF-text-to-questions parser. Looks for numbered items
+// ("1.", "1)"), then within each item's block looks for either a run of
+// underscores (a fill-in blank) or lettered options (A./B)/etc — a
+// multiple-choice question). Anything else becomes a short-answer item.
+// This is intentionally simple and imperfect — it's a starting point the
+// teacher reviews and edits, never posted un-reviewed.
+function parseWorksheetText(rawText){
+  const lines = rawText.split('\n').map(l=> l.replace(/\s+/g,' ').trim()).filter(Boolean);
+  const numberRe = /^(\d{1,2})[\.\)]\s+(.*)$/;
+  const mcOptRe = /^\(?([A-Da-d])[\.\)]\s+(.*)$/;
+  const blankRe = /_{3,}/;
+  const items = [];
+  let current = null;
+
+  function pushCurrent(){
+    if(!current) return;
+    const stemJoined = current.stemParts.join(' ').replace(/\s+/g,' ').trim();
+    let type, stem;
+    if(current.options.length >= 2){
+      type = 'mc';
+      stem = stemJoined;
+    }else if(blankRe.test(stemJoined)){
+      type = 'blank';
+      stem = stemJoined.replace(blankRe, '{{blank}}');
+    }else{
+      type = 'short';
+      stem = stemJoined;
+    }
+    if(stem){
+      items.push({
+        id: newQuestionId(), type, stem,
+        options: current.options.map(o=> o.text),
+        correctAnswer: ''
+      });
+    }
+    current = null;
+  }
+
+  lines.forEach(line=>{
+    const numMatch = line.match(numberRe);
+    const optMatch = line.match(mcOptRe);
+    if(numMatch){
+      pushCurrent();
+      current = { stemParts: [numMatch[2]], options: [] };
+    }else if(optMatch && current){
+      current.options.push({ letter: optMatch[1].toUpperCase(), text: optMatch[2] });
+    }else if(current){
+      current.stemParts.push(line);
+    }
+    // lines before the first numbered item (titles, general instructions) are skipped
+  });
+  pushCurrent();
+  return items.slice(0, 40);
+}
+
+async function toggleGrammarResponses(hwId){
+  const wasExpanded = !!hwResponsesExpanded[hwId];
+  hwResponsesExpanded[hwId] = !wasExpanded;
+  if(wasExpanded){ render(); return; }
+  render(); // shows the "Loading…" placeholder immediately
+  const h = homework.find(x=> x.id === hwId);
+  const subsSnap = await db.collection('classes').doc(classId).collection('homework').doc(hwId).collection('submissions').get();
+  const container = document.getElementById('gr-responses-' + hwId);
+  if(!container) return; // user switched tabs before this resolved
+  if(subsSnap.empty){ container.innerHTML = '<p class="meta" style="margin-top:10px;">No responses yet.</p>'; return; }
+  const docs = [...subsSnap.docs].sort((a,b)=> (a.data().studentName || '').localeCompare(b.data().studentName || ''));
+  const isQ = h && h.mode === 'questions';
+  const isWs = h && h.mode === 'worksheet';
+  let html = '<div style="margin-top:10px;display:flex;flex-direction:column;gap:10px;">';
+  docs.forEach(d=>{
+    const s = d.data();
+    let body;
+    let scoreLine = '';
+    if(isQ){
+      body = `<ol style="margin:6px 0 0;padding-left:18px;">${(h.questions||[]).map(q=> `<li style="margin-bottom:4px;">${escapeHtml(q.text)}<br><span class="body-text">${escapeHtml((s.answers && s.answers[q.id]) || '(no answer)')}</span></li>`).join('')}</ol>`;
+    }else if(isWs){
+      const score = scoreWorksheetSubmission(h, s.answers);
+      if(score.gradable > 0){
+        scoreLine = `<span class="meta" style="font-weight:700;color:${score.correct===score.gradable ? 'var(--green-ok)' : 'var(--forest)'};">${score.correct}/${score.gradable} correct</span>`;
+      }
+      body = `<ol style="margin:6px 0 0;padding-left:18px;">${(h.items||[]).map(it=>{
+        const given = (s.answers && s.answers[it.id]) || '';
+        const grade = gradeWorksheetItem(it, given);
+        const badge = grade === 'correct'
+          ? `<span class="stamp submitted" style="margin-left:6px;">✓ correct</span>`
+          : grade === 'wrong'
+            ? `<span class="stamp overdue" style="margin-left:6px;">✗ incorrect</span>`
+            : '';
+        const correctNote = (grade === 'wrong' && it.correctAnswer) ? ` <span class="meta">(answer key: ${escapeHtml(it.correctAnswer)})</span>` : '';
+        return `<li style="margin-bottom:6px;">${escapeHtml((it.stem||'').replace('{{blank}}','____'))}<br><span class="body-text">${escapeHtml(given || '(no answer)')}</span>${badge}${correctNote}</li>`;
+      }).join('')}</ol>`;
+    }else{
+      body = s.text ? `<p class="body-text" style="white-space:pre-wrap;margin-top:6px;">${escapeHtml(s.text)}</p>` : '<p class="meta" style="margin-top:6px;">(no typed text)</p>';
+    }
+    html += `<div style="border-top:0.5px solid var(--line);padding-top:10px;">
+      <div style="display:flex;justify-content:space-between;gap:10px;"><strong style="font-size:13px;">${escapeHtml(s.studentName)}</strong><span class="meta">attempt ${s.attemptCount || 1} · ${timeAgo(tsVal(s.submittedAt))}${scoreLine ? ' · ' : ''}${scoreLine}</span></div>
+      ${body}
       ${s.attachmentUrl ? `<a href="${s.attachmentUrl}" download="${escapeHtml(s.attachmentName || 'file')}" class="meta">📎 ${escapeHtml(s.attachmentName || 'attached file')}</a>` : ''}
     </div>`;
   });

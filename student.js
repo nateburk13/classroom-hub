@@ -334,13 +334,15 @@ let currentHwCategory = 'grammar';
 // Which writing prompts currently have their inline "write here" panel open.
 let hwExpanded = {};
 // Fixed set of categories — a field on each doc rather than separate
-// collections, so the UI can filter client-side.
+// collections, so the UI can filter client-side. `style` must match
+// teacher.js's HOMEWORK_CATEGORIES so both sides render the same category
+// the same way.
 const HOMEWORK_CATEGORIES = [
-  { id:'grammar', label:'Grammar' },
-  { id:'writing', label:'Writing' },
-  { id:'vocab', label:'Vocab' },
-  { id:'spelling', label:'Spelling' },
-  { id:'speech', label:'Speech' }
+  { id:'grammar', label:'Grammar', style:'builder' },
+  { id:'writing', label:'Writing', style:'writing' },
+  { id:'vocab', label:'Vocab', style:'builder' },
+  { id:'spelling', label:'Spelling', style:'generic' },
+  { id:'speech', label:'Speech', style:'generic' }
 ];
 let loaded = { assignments: false, announcements: false, quizzes: false, books: false, homework: false };
 let unsubAssignments = null, unsubAnnouncements = null, unsubQuizzes = null, unsubBooks = null, unsubHomework = null;
@@ -562,7 +564,8 @@ function renderAssignments(){
 
 function renderHomework(){
   setHeader('Homework', "Complete homework in each category — resubmit anytime before it's due.");
-  const activeLabel = HOMEWORK_CATEGORIES.find(c=> c.id === currentHwCategory).label;
+  const catMeta = HOMEWORK_CATEGORIES.find(c=> c.id === currentHwCategory);
+  const activeLabel = catMeta.label;
   let html = `<div class="pill-tabs">${HOMEWORK_CATEGORIES.map(c=> `<button class="pill-tab ${c.id===currentHwCategory?'active':''}" data-hw-cat="${c.id}">${c.label}</button>`).join('')}</div>`;
 
   if(!loaded.homework){
@@ -580,11 +583,24 @@ function renderHomework(){
     return;
   }
 
-  if(currentHwCategory === 'writing'){
+  if(catMeta.style === 'writing'){
     [...items].sort((a,b)=> (a.dueDate||'').localeCompare(b.dueDate||'')).forEach(h=>{ html += renderWritingStudentCard(h); });
     viewRoot.innerHTML = html;
     wireHomeworkTabs();
     wireWritingStudentCards();
+    return;
+  }
+
+  if(catMeta.style === 'builder'){
+    [...items].sort((a,b)=> (a.dueDate||'').localeCompare(b.dueDate||'')).forEach(h=>{ html += renderGrammarStudentCard(h); });
+    viewRoot.innerHTML = html;
+    wireHomeworkTabs();
+    // Prompt-mode items reuse the writing wiring (expand/collapse, textarea,
+    // save); question-mode and worksheet-mode items need their own save
+    // wiring on top.
+    wireWritingStudentCards();
+    wireQuestionsStudentCards();
+    wireWorksheetStudentCards();
     return;
   }
 
@@ -730,6 +746,261 @@ async function saveWritingSubmission(hwId){
     render();
   }catch(e){
     saveBtn.disabled = false; saveBtn.textContent = existing ? 'Update submission' : 'Submit';
+    err.textContent = e.message || "Couldn't save — check your connection and try again.";
+  }
+}
+
+/* Grammar tab: each item is either "prompt" mode (identical to Writing —
+   reuse renderWritingStudentCard/saveWritingSubmission directly, they're
+   category-agnostic) or "questions" mode (a short-answer input per
+   question, saved into an answers map keyed by question id). */
+function renderGrammarStudentCard(h){
+  if(h.mode === 'questions') return renderQuestionsStudentCard(h);
+  if(h.mode === 'worksheet') return renderWorksheetStudentCard(h);
+  return renderWritingStudentCard(h);
+}
+
+/* Worksheet mode: items imported (and edited) by the teacher from a PDF.
+   Each item is fill-in-the-blank (stem with a {{blank}} token rendered as
+   an inline input), multiple choice (radio buttons), or short answer
+   (textarea) — same local-draft-autosave pattern as the other modes. */
+function renderWorksheetStudentCard(h){
+  const sub = myHwSubmissions[h.id];
+  const status = statusForHomework(h);
+  const overdue = h.dueDate && new Date(h.dueDate) < new Date(new Date().toDateString());
+  const expanded = !!hwExpanded[h.id];
+  const items = h.items || [];
+  const answeredCount = sub && sub.answers ? items.filter(it=> (sub.answers[it.id] || '').trim()).length : 0;
+
+  let card = `<div class="card">
+    <div class="card-row">
+      <div>
+        <h3>${escapeHtml(h.title)}</h3>
+        <div class="meta">${h.dueDate ? `Due ${h.dueDate}` : 'No due date'} · ${items.length} question${items.length === 1 ? '' : 's'}</div>
+        ${h.instructions ? `<p class="body-text">${escapeHtml(h.instructions)}</p>` : ''}
+        ${h.attachmentUrl ? `<img src="${h.attachmentUrl}" alt="Worksheet reference" style="max-width:220px;border-radius:8px;border:0.5px solid var(--line);margin-top:8px;display:block;">` : ''}
+      </div>
+      <span class="stamp ${status.cls}">${status.label}</span>
+    </div>`;
+
+  if(sub && !expanded){
+    card += `<div class="meta" style="margin-top:8px;">Answered ${answeredCount}/${items.length} · last saved ${timeAgo(tsVal(sub.submittedAt))} (attempt ${sub.attemptCount || 1})</div>`;
+  }
+
+  if(overdue && !expanded){
+    card += sub
+      ? `<div class="meta" style="margin-top:6px;">Due date passed — your last answers are locked in.</div>`
+      : `<div class="form-actions"><span class="meta">Due date passed — no longer accepting submissions.</span></div>`;
+  }else if(!expanded){
+    card += `<div class="form-actions"><button class="btn ${sub ? '' : 'primary'} small" data-hw-expand="${h.id}">${sub ? 'Continue' : 'Start'}</button></div>`;
+  }else{
+    let draftAnswers = {};
+    if(sub && sub.answers){ draftAnswers = sub.answers; }
+    else{
+      try{ draftAnswers = JSON.parse(localStorage.getItem(draftKey(h.id)) || '{}'); }catch(e){ draftAnswers = {}; }
+    }
+    card += `<div style="margin-top:12px;display:flex;flex-direction:column;gap:14px;">`;
+    items.forEach((it, i)=>{
+      card += `<div class="field">`;
+      if(it.type === 'mc'){
+        card += `<label style="margin-bottom:6px;">${i + 1}. ${escapeHtml(it.stem)}</label>`;
+        (it.options || []).filter(o=> o).forEach(opt=>{
+          const checked = draftAnswers[it.id] === opt ? 'checked' : '';
+          card += `<label style="display:flex;align-items:center;gap:6px;font-weight:400;margin-bottom:4px;"><input type="radio" name="ws-${h.id}-${it.id}" class="ws-answer" data-item-id="${it.id}" value="${escapeHtml(opt)}" style="width:auto;" ${checked}> ${escapeHtml(opt)}</label>`;
+        });
+      }else if(it.type === 'blank'){
+        const parts = (it.stem || '').split('{{blank}}');
+        card += `<label style="margin-bottom:6px;">${i + 1}.</label>
+          <div class="body-text" style="margin-top:0;">`;
+        if(parts.length > 1){
+          card += `${escapeHtml(parts[0])} <input type="text" class="ws-answer mono" data-item-id="${it.id}" value="${escapeHtml(draftAnswers[it.id] || '')}" style="display:inline-block;width:150px;vertical-align:baseline;"> ${escapeHtml(parts.slice(1).join(''))}`;
+        }else{
+          card += `${escapeHtml(it.stem)} <input type="text" class="ws-answer mono" data-item-id="${it.id}" value="${escapeHtml(draftAnswers[it.id] || '')}" style="display:inline-block;width:150px;vertical-align:baseline;">`;
+        }
+        card += `</div>`;
+      }else{
+        card += `<label>${i + 1}. ${escapeHtml(it.stem)}</label>
+          <textarea class="ws-answer" data-item-id="${it.id}" rows="2" placeholder="Your answer">${escapeHtml(draftAnswers[it.id] || '')}</textarea>`;
+      }
+      card += `</div>`;
+    });
+    card += `</div>
+    <div class="field" style="margin-top:10px;"><label>Or attach a file/photo instead (optional)</label><input id="ws-file-${h.id}" type="file" accept="image/*,.pdf,.doc,.docx"></div>
+    ${sub && sub.attachmentUrl ? `<div class="meta">Current file: <a href="${sub.attachmentUrl}" download="${escapeHtml(sub.attachmentName || 'file')}">${escapeHtml(sub.attachmentName || 'attachment')}</a> — choosing a new file replaces it.</div>` : ''}
+    <div class="form-actions">
+      <button class="btn small" data-hw-collapse="${h.id}">Cancel</button>
+      <button class="btn primary small" data-hw-save-ws="${h.id}">${sub ? 'Update answers' : 'Submit answers'}</button>
+    </div>
+    <div class="gate-error" id="ws-error-${h.id}"></div>`;
+  }
+
+  card += `</div>`;
+  return card;
+}
+
+function wireWorksheetStudentCards(){
+  viewRoot.querySelectorAll('[data-hw-save-ws]').forEach(b=> b.onclick = ()=> saveWorksheetSubmission(b.dataset.hwSaveWs));
+  viewRoot.querySelectorAll('.ws-answer').forEach(inp=>{
+    const evt = inp.type === 'radio' ? 'change' : 'input';
+    inp.addEventListener(evt, ()=>{
+      const card = inp.closest('.card');
+      const saveBtn = card.querySelector('[data-hw-save-ws]');
+      if(!saveBtn) return;
+      const hwId = saveBtn.dataset.hwSaveWs;
+      if(myHwSubmissions[hwId]) return;
+      clearTimeout(card._wsDraftTimer);
+      card._wsDraftTimer = setTimeout(()=>{
+        const answers = {};
+        card.querySelectorAll('.ws-answer').forEach(a=>{
+          if(a.type === 'radio'){ if(a.checked) answers[a.dataset.itemId] = a.value; }
+          else{ answers[a.dataset.itemId] = a.value; }
+        });
+        localStorage.setItem(draftKey(hwId), JSON.stringify(answers));
+      }, 500);
+    });
+  });
+}
+
+async function saveWorksheetSubmission(hwId){
+  const existing = myHwSubmissions[hwId];
+  const saveBtn = document.querySelector(`[data-hw-save-ws="${hwId}"]`);
+  const card = saveBtn.closest('.card');
+  const answers = {};
+  card.querySelectorAll('.ws-answer').forEach(inp=>{
+    if(inp.type === 'radio'){ if(inp.checked) answers[inp.dataset.itemId] = inp.value; }
+    else{ answers[inp.dataset.itemId] = inp.value.trim(); }
+  });
+  const fileInput = document.getElementById('ws-file-' + hwId);
+  const err = document.getElementById('ws-error-' + hwId);
+  const file = fileInput.files[0];
+  const hasAnyAnswer = Object.values(answers).some(v=> v);
+  if(!hasAnyAnswer && !file && !(existing && existing.attachmentUrl)){ err.textContent = 'Answer at least one question or attach a file before submitting.'; return; }
+  saveBtn.disabled = true; saveBtn.textContent = 'Saving…'; err.textContent = '';
+  try{
+    let attachmentUrl = existing ? (existing.attachmentUrl || null) : null;
+    let attachmentName = existing ? (existing.attachmentName || null) : null;
+    if(file){ attachmentUrl = await fileToAttachment(file); attachmentName = file.name; }
+    const attemptCount = (existing && existing.attemptCount ? existing.attemptCount : 0) + 1;
+    await db.collection('classes').doc(classId).collection('homework').doc(hwId)
+      .collection('submissions').doc(studentDocId()).set({
+        studentName, text: '', answers, attachmentUrl, attachmentName, attemptCount,
+        submittedAt: firebase.firestore.FieldValue.serverTimestamp()
+      });
+    localStorage.removeItem(draftKey(hwId));
+    myHwSubmissions[hwId] = { studentName, text: '', answers, attachmentUrl, attachmentName, attemptCount, submittedAt: { toMillis: ()=> Date.now() } };
+    hwExpanded[hwId] = false;
+    render();
+  }catch(e){
+    saveBtn.disabled = false; saveBtn.textContent = existing ? 'Update answers' : 'Submit answers';
+    err.textContent = e.message || "Couldn't save — check your connection and try again.";
+  }
+}
+
+function renderQuestionsStudentCard(h){
+  const sub = myHwSubmissions[h.id];
+  const status = statusForHomework(h);
+  const overdue = h.dueDate && new Date(h.dueDate) < new Date(new Date().toDateString());
+  const expanded = !!hwExpanded[h.id];
+  const questions = h.questions || [];
+  const answeredCount = sub && sub.answers ? questions.filter(q=> (sub.answers[q.id] || '').trim()).length : 0;
+
+  let card = `<div class="card">
+    <div class="card-row">
+      <div>
+        <h3>${escapeHtml(h.title)}</h3>
+        <div class="meta">${h.dueDate ? `Due ${h.dueDate}` : 'No due date'} · ${questions.length} question${questions.length === 1 ? '' : 's'}</div>
+        ${h.instructions ? `<p class="body-text">${escapeHtml(h.instructions)}</p>` : ''}
+        ${h.attachmentUrl ? `<a href="${h.attachmentUrl}" download="${escapeHtml(h.attachmentName || 'attachment')}" class="meta" style="color:var(--forest);text-decoration:underline;">📎 ${escapeHtml(h.attachmentName || 'attachment')}</a>` : ''}
+      </div>
+      <span class="stamp ${status.cls}">${status.label}</span>
+    </div>`;
+
+  if(sub && !expanded){
+    card += `<div class="meta" style="margin-top:8px;">Answered ${answeredCount}/${questions.length} · last saved ${timeAgo(tsVal(sub.submittedAt))} (attempt ${sub.attemptCount || 1})</div>`;
+  }
+
+  if(overdue && !expanded){
+    card += sub
+      ? `<div class="meta" style="margin-top:6px;">Due date passed — your last answers are locked in.</div>`
+      : `<div class="form-actions"><span class="meta">Due date passed — no longer accepting submissions.</span></div>`;
+  }else if(!expanded){
+    card += `<div class="form-actions"><button class="btn ${sub ? '' : 'primary'} small" data-hw-expand="${h.id}">${sub ? 'Continue' : 'Start'}</button></div>`;
+  }else{
+    let draftAnswers = {};
+    if(sub && sub.answers){ draftAnswers = sub.answers; }
+    else{
+      try{ draftAnswers = JSON.parse(localStorage.getItem(draftKey(h.id)) || '{}'); }catch(e){ draftAnswers = {}; }
+    }
+    card += `<div style="margin-top:12px;display:flex;flex-direction:column;gap:10px;">`;
+    questions.forEach((q, i)=>{
+      card += `<div class="field">
+        <label>${i + 1}. ${escapeHtml(q.text)}</label>
+        <input type="text" class="gq-answer" data-qid="${q.id}" placeholder="Your answer" value="${escapeHtml(draftAnswers[q.id] || '')}">
+      </div>`;
+    });
+    card += `</div>
+    <div class="field"><label>Or attach a file/photo instead (optional)</label><input id="gq-file-${h.id}" type="file" accept="image/*,.pdf,.doc,.docx"></div>
+    ${sub && sub.attachmentUrl ? `<div class="meta">Current file: <a href="${sub.attachmentUrl}" download="${escapeHtml(sub.attachmentName || 'file')}">${escapeHtml(sub.attachmentName || 'attachment')}</a> — choosing a new file replaces it.</div>` : ''}
+    <div class="form-actions">
+      <button class="btn small" data-hw-collapse="${h.id}">Cancel</button>
+      <button class="btn primary small" data-hw-save-q="${h.id}">${sub ? 'Update answers' : 'Submit answers'}</button>
+    </div>
+    <div class="gate-error" id="gq-error-${h.id}"></div>`;
+  }
+
+  card += `</div>`;
+  return card;
+}
+
+function wireQuestionsStudentCards(){
+  viewRoot.querySelectorAll('[data-hw-save-q]').forEach(b=> b.onclick = ()=> saveQuestionsSubmission(b.dataset.hwSaveQ));
+  // Debounced local draft save, same idea as the Writing textarea draft —
+  // only while there's no existing submission yet, mirroring that pattern.
+  viewRoot.querySelectorAll('.gq-answer').forEach(inp=>{
+    inp.addEventListener('input', ()=>{
+      const card = inp.closest('.card');
+      const saveBtn = card.querySelector('[data-hw-save-q]');
+      if(!saveBtn) return;
+      const hwId = saveBtn.dataset.hwSaveQ;
+      if(myHwSubmissions[hwId]) return;
+      clearTimeout(inp._draftTimer);
+      inp._draftTimer = setTimeout(()=>{
+        const answers = {};
+        card.querySelectorAll('.gq-answer').forEach(a=>{ answers[a.dataset.qid] = a.value; });
+        localStorage.setItem(draftKey(hwId), JSON.stringify(answers));
+      }, 500);
+    });
+  });
+}
+
+async function saveQuestionsSubmission(hwId){
+  const existing = myHwSubmissions[hwId];
+  const saveBtn = document.querySelector(`[data-hw-save-q="${hwId}"]`);
+  const card = saveBtn.closest('.card');
+  const answers = {};
+  card.querySelectorAll('.gq-answer').forEach(inp=>{ answers[inp.dataset.qid] = inp.value.trim(); });
+  const fileInput = document.getElementById('gq-file-' + hwId);
+  const err = document.getElementById('gq-error-' + hwId);
+  const file = fileInput.files[0];
+  const hasAnyAnswer = Object.values(answers).some(v=> v);
+  if(!hasAnyAnswer && !file && !(existing && existing.attachmentUrl)){ err.textContent = 'Answer at least one question or attach a file before submitting.'; return; }
+  saveBtn.disabled = true; saveBtn.textContent = 'Saving…'; err.textContent = '';
+  try{
+    let attachmentUrl = existing ? (existing.attachmentUrl || null) : null;
+    let attachmentName = existing ? (existing.attachmentName || null) : null;
+    if(file){ attachmentUrl = await fileToAttachment(file); attachmentName = file.name; }
+    const attemptCount = (existing && existing.attemptCount ? existing.attemptCount : 0) + 1;
+    await db.collection('classes').doc(classId).collection('homework').doc(hwId)
+      .collection('submissions').doc(studentDocId()).set({
+        studentName, text: '', answers, attachmentUrl, attachmentName, attemptCount,
+        submittedAt: firebase.firestore.FieldValue.serverTimestamp()
+      });
+    localStorage.removeItem(draftKey(hwId));
+    myHwSubmissions[hwId] = { studentName, text: '', answers, attachmentUrl, attachmentName, attemptCount, submittedAt: { toMillis: ()=> Date.now() } };
+    hwExpanded[hwId] = false;
+    render();
+  }catch(e){
+    saveBtn.disabled = false; saveBtn.textContent = existing ? 'Update answers' : 'Submit answers';
     err.textContent = e.message || "Couldn't save — check your connection and try again.";
   }
 }
