@@ -1429,10 +1429,11 @@ function closeModal(bg){
 }
 
 function openHomeworkModal(presetCategory){
+  const genericCategories = HOMEWORK_CATEGORIES.filter(c=> c.style === 'generic');
   const modal = openModal(`
     <h3>New homework</h3>
     <div class="field"><label>Category</label>
-      <select id="hw-category">${HOMEWORK_CATEGORIES.map(c=> `<option value="${c.id}" ${c.id===presetCategory?'selected':''}>${c.label}</option>`).join('')}</select>
+      <select id="hw-category">${genericCategories.map(c=> `<option value="${c.id}" ${c.id===presetCategory?'selected':''}>${c.label}</option>`).join('')}</select>
     </div>
     <div class="field"><label>Title</label><input id="hw-title" placeholder="Plural nouns worksheet"></div>
     <div class="field"><label>Instructions</label><textarea id="hw-instr" rows="3" placeholder="What should students do?"></textarea></div>
