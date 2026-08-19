@@ -466,17 +466,6 @@ const viewRoot = document.getElementById('view-root');
 
 function render(){
   document.querySelectorAll('.nav-btn').forEach(b=> b.classList.toggle('active', b.dataset.view === currentView));
-  // The Grammar/Vocab builder and the Writing prompt form are rendered
-  // directly into viewRoot and hold state that only lives in the DOM
-  // (typed title/instructions, extracted PDF items, status messages) — not
-  // in module-level variables. Background snapshot updates fire render()
-  // very frequently (e.g. every online student's presence heartbeat, ~25s),
-  // so without this guard an open form — and any status message on it, like
-  // a PDF-extraction error — gets silently wiped, sometimes before it's even
-  // readable. Skip re-rendering while one of these forms is open; explicit
-  // calls to render() after save/cancel (which flip the flag first) still
-  // go through normally.
-  if(currentView === 'homework' && (showNewGrammarForm || showNewHwForm)) return;
   const renderers = { dashboard: renderDashboard, assignments: renderAssignments, announcements: renderAnnouncements, homework: renderHomework, quizzes: renderQuizzes, books: renderBooks, students: renderStudents, whiteboard: renderWhiteboard };
   (renderers[currentView] || renderDashboard)();
 }
@@ -1023,7 +1012,7 @@ function wireGrammarTeacherView(category){
           status.textContent = `Reading page ${i} of ${pagesToRead}…`;
           const page = await pdf.getPage(i);
           const content = await page.getTextContent();
-          fullText += content.items.map(it=> it.str).join(' ') + '\n';
+          fullText += textItemsToLines(content.items) + '\n';
         }
         // A page image (with any figures/photos on it) so the teacher — and
         // later the student — has visual context text extraction can't capture.
@@ -1121,6 +1110,31 @@ function wireGrammarTeacherView(category){
 // multiple-choice question). Anything else becomes a short-answer item.
 // This is intentionally simple and imperfect — it's a starting point the
 // teacher reviews and edits, never posted un-reviewed.
+// pdf.js's getTextContent() returns a flat list of text fragments with x/y
+// positions but NO line breaks — fragments from every line on the page are
+// otherwise indistinguishable from each other once joined. This groups
+// fragments into lines by watching for y-position jumps (a new line of text)
+// so downstream parsing (numbered items, blanks, MC options) actually sees
+// real line boundaries instead of one giant run-on line per page.
+function textItemsToLines(items){
+  const lines = [];
+  let current = [];
+  let lastY = null;
+  const Y_TOLERANCE = 2;
+  items.forEach(item=>{
+    const y = (item.transform && item.transform.length >= 6) ? item.transform[5] : 0;
+    if(lastY !== null && Math.abs(y - lastY) > Y_TOLERANCE){
+      lines.push(current.join(' '));
+      current = [];
+    }
+    if(item.str) current.push(item.str);
+    lastY = y;
+    if(item.hasEOL){ lines.push(current.join(' ')); current = []; lastY = null; }
+  });
+  if(current.length) lines.push(current.join(' '));
+  return lines.join('\n');
+}
+
 function parseWorksheetText(rawText){
   const lines = rawText.split('\n').map(l=> l.replace(/\s+/g,' ').trim()).filter(Boolean);
   const numberRe = /^(\d{1,2})[\.\)]\s+(.*)$/;
