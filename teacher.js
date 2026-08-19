@@ -466,6 +466,16 @@ const viewRoot = document.getElementById('view-root');
 
 function render(){
   document.querySelectorAll('.nav-btn').forEach(b=> b.classList.toggle('active', b.dataset.view === currentView));
+  // The Grammar/Vocab builder and the Writing prompt form are rendered
+  // directly into viewRoot and hold state that only lives in the DOM
+  // (typed title/instructions, extracted PDF items, status messages) — not
+  // in module-level variables. Background snapshot updates fire render()
+  // very frequently (e.g. every online student's presence heartbeat, ~25s),
+  // so without this guard an open form gets silently wiped mid-review or
+  // mid-edit. Skip re-rendering while one of these forms is open; explicit
+  // calls to render() after save/cancel (which flip the flag first) still
+  // go through normally.
+  if(currentView === 'homework' && (showNewGrammarForm || showNewHwForm)) return;
   const renderers = { dashboard: renderDashboard, assignments: renderAssignments, announcements: renderAnnouncements, homework: renderHomework, quizzes: renderQuizzes, books: renderBooks, students: renderStudents, whiteboard: renderWhiteboard };
   (renderers[currentView] || renderDashboard)();
 }
