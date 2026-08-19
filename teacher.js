@@ -337,7 +337,7 @@ function startApp(id, info){
         assignments.push(a);
       }
       loaded.assignments = true;
-      render();
+      renderFromListener();
       markSynced(true);
     }, ()=> markSynced(false));
 
@@ -345,7 +345,7 @@ function startApp(id, info){
     .onSnapshot((snap)=>{
       announcements = snap.docs.map(d=>({ id:d.id, ...d.data() }));
       loaded.announcements = true;
-      render();
+      renderFromListener();
       markSynced(true);
     }, ()=> markSynced(false));
 
@@ -359,7 +359,7 @@ function startApp(id, info){
         quizzes.push(q);
       }
       loaded.quizzes = true;
-      render();
+      renderFromListener();
       markSynced(true);
     }, ()=> markSynced(false));
 
@@ -373,7 +373,7 @@ function startApp(id, info){
         homework.push(h);
       }
       loaded.homework = true;
-      render();
+      renderFromListener();
       markSynced(true);
     }, ()=> markSynced(false));
 
@@ -382,7 +382,7 @@ function startApp(id, info){
       books = snap.docs.map(d=>({ id:d.id, ...d.data() }))
         .sort((a,b)=> tsVal(b.createdAt)-tsVal(a.createdAt));
       loaded.books = true;
-      render();
+      renderFromListener();
       markSynced(true);
     }, ()=> markSynced(false));
 
@@ -390,7 +390,7 @@ function startApp(id, info){
     .onSnapshot((snap)=>{
       presence = snap.docs.map(d=>({ id:d.id, ...d.data() })).filter(p=> p.role !== 'teacher');
       loaded.students = true;
-      render();
+      renderFromListener();
       markSynced(true);
     }, ()=> markSynced(false));
 }
@@ -466,18 +466,23 @@ const viewRoot = document.getElementById('view-root');
 
 function render(){
   document.querySelectorAll('.nav-btn').forEach(b=> b.classList.toggle('active', b.dataset.view === currentView));
-  // The Grammar/Vocab builder and the Writing prompt form are rendered
-  // directly into viewRoot and hold state that only lives in the DOM
-  // (typed title/instructions, extracted PDF items, status messages) — not
-  // in module-level variables. Background snapshot updates fire render()
-  // very frequently (e.g. every online student's presence heartbeat, ~25s),
-  // so without this guard an open form gets silently wiped mid-review or
-  // mid-edit. Skip re-rendering while one of these forms is open; explicit
-  // calls to render() after save/cancel (which flip the flag first) still
-  // go through normally.
-  if(currentView === 'homework' && (showNewGrammarForm || showNewHwForm)) return;
   const renderers = { dashboard: renderDashboard, assignments: renderAssignments, announcements: renderAnnouncements, homework: renderHomework, quizzes: renderQuizzes, books: renderBooks, students: renderStudents, whiteboard: renderWhiteboard };
   (renderers[currentView] || renderDashboard)();
+}
+
+// Firestore onSnapshot listeners call this instead of render() directly.
+// The Grammar/Vocab builder and Writing prompt form are rendered straight
+// into viewRoot and hold state that only lives in the DOM (typed
+// title/instructions, extracted PDF items, status messages) — not in
+// module-level variables. Listeners fire very frequently in the background
+// (e.g. every online student's presence heartbeat, ~25s), so calling
+// render() unconditionally from them wipes an open form mid-edit. Skipping
+// here only affects those background callbacks — explicit render() calls
+// from button handlers (opening/closing the form, posting it) are
+// untouched, so the "New homework" button still works normally.
+function renderFromListener(){
+  if(currentView === 'homework' && (showNewGrammarForm || showNewHwForm)) return;
+  render();
 }
 
 function setHeader(title, subtitle){
