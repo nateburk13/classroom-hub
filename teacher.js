@@ -466,6 +466,17 @@ const viewRoot = document.getElementById('view-root');
 
 function render(){
   document.querySelectorAll('.nav-btn').forEach(b=> b.classList.toggle('active', b.dataset.view === currentView));
+  // The Grammar/Vocab builder and the Writing prompt form are rendered
+  // directly into viewRoot and hold state that only lives in the DOM
+  // (typed title/instructions, extracted PDF items, status messages) — not
+  // in module-level variables. Background snapshot updates fire render()
+  // very frequently (e.g. every online student's presence heartbeat, ~25s),
+  // so without this guard an open form — and any status message on it, like
+  // a PDF-extraction error — gets silently wiped, sometimes before it's even
+  // readable. Skip re-rendering while one of these forms is open; explicit
+  // calls to render() after save/cancel (which flip the flag first) still
+  // go through normally.
+  if(currentView === 'homework' && (showNewGrammarForm || showNewHwForm)) return;
   const renderers = { dashboard: renderDashboard, assignments: renderAssignments, announcements: renderAnnouncements, homework: renderHomework, quizzes: renderQuizzes, books: renderBooks, students: renderStudents, whiteboard: renderWhiteboard };
   (renderers[currentView] || renderDashboard)();
 }
@@ -1429,11 +1440,10 @@ function closeModal(bg){
 }
 
 function openHomeworkModal(presetCategory){
-  const genericCategories = HOMEWORK_CATEGORIES.filter(c=> c.style === 'generic');
   const modal = openModal(`
     <h3>New homework</h3>
     <div class="field"><label>Category</label>
-      <select id="hw-category">${genericCategories.map(c=> `<option value="${c.id}" ${c.id===presetCategory?'selected':''}>${c.label}</option>`).join('')}</select>
+      <select id="hw-category">${HOMEWORK_CATEGORIES.map(c=> `<option value="${c.id}" ${c.id===presetCategory?'selected':''}>${c.label}</option>`).join('')}</select>
     </div>
     <div class="field"><label>Title</label><input id="hw-title" placeholder="Plural nouns worksheet"></div>
     <div class="field"><label>Instructions</label><textarea id="hw-instr" rows="3" placeholder="What should students do?"></textarea></div>
