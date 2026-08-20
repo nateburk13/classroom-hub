@@ -884,7 +884,6 @@ function renderGrammarTeacherView(items, category){
             ${h.instructions ? `<p class="body-text">${escapeHtml(h.instructions)}</p>` : ''}
             ${isQ ? `<ol style="margin:6px 0 0;padding-left:18px;font-size:13px;color:var(--forest);">${(h.questions||[]).map(q=> `<li>${escapeHtml(q.text)}</li>`).join('')}</ol>` : ''}
             ${isWs ? `<ol style="margin:6px 0 0;padding-left:18px;font-size:13px;color:var(--forest);">${(h.items||[]).map(it=> `<li>${escapeHtml((it.stem||'').replace('{{blank}}','____'))}</li>`).join('')}</ol>` : ''}
-            ${isWs && h.attachmentUrl ? `<img src="${h.attachmentUrl}" style="max-width:180px;border-radius:8px;border:0.5px solid var(--line);margin-top:8px;display:block;">` : ''}
             ${!isWs && h.attachmentUrl ? `<a href="${h.attachmentUrl}" download="${escapeHtml(h.attachmentName || 'attachment')}" class="meta" style="color:var(--forest);text-decoration:underline;">📎 ${escapeHtml(h.attachmentName || 'attachment')}</a>` : ''}
           </div>
           <span class="stamp ${status.cls}">${status.label}</span>
@@ -1085,10 +1084,7 @@ function wireGrammarTeacherView(category){
         const hasDue = document.getElementById('gr-has-due').checked;
         let attachmentUrl = null;
         let attachmentName = null;
-        if(mode === 'worksheet'){
-          attachmentUrl = wsPageImage;
-          attachmentName = 'worksheet-page-1.jpg';
-        }else{
+        if(mode !== 'worksheet'){
           const file = document.getElementById('gr-file').files[0];
           attachmentUrl = file ? await fileToAttachment(file) : null;
           attachmentName = file ? file.name : null;

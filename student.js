@@ -778,7 +778,6 @@ function renderWorksheetStudentCard(h){
         <h3>${escapeHtml(h.title)}</h3>
         <div class="meta">${h.dueDate ? `Due ${h.dueDate}` : 'No due date'} · ${items.length} question${items.length === 1 ? '' : 's'}</div>
         ${h.instructions ? `<p class="body-text">${escapeHtml(h.instructions)}</p>` : ''}
-        ${h.attachmentUrl ? `<img src="${h.attachmentUrl}" alt="Worksheet reference" style="max-width:220px;border-radius:8px;border:0.5px solid var(--line);margin-top:8px;display:block;">` : ''}
       </div>
       <span class="stamp ${status.cls}">${status.label}</span>
     </div>`;

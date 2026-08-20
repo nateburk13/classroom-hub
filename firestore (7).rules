@@ -176,17 +176,25 @@ service cloud.firestore {
         && (data.dueDate == null || (data.dueDate is string && data.dueDate.size() < 20))
         && (!('attachmentName' in data) || data.attachmentName == null || (data.attachmentName is string && data.attachmentName.size() < 200))
         && (!('attachmentUrl' in data) || data.attachmentUrl == null || (data.attachmentUrl is string && data.attachmentUrl.size() <= 1000000))
-        && (!('mode' in data) || data.mode in ['prompt', 'questions'])
-        && (!('questions' in data) || isValidHomeworkQuestions(data.questions));
+        && (!('mode' in data) || data.mode in ['prompt', 'questions', 'worksheet'])
+        && (!('questions' in data) || isValidHomeworkQuestions(data.questions))
+        && (!('items' in data) || isValidHomeworkItems(data.items));
     }
+    // Firestore Security Rules don't support iterating/validating each
+    // element of an arbitrary-length list (no .filter()/.map()-style
+    // comprehension over lists, despite it looking like valid CEL syntax) —
+    // so, like isValidQuiz below does for its own richly-structured
+    // `questions` list, this only checks the list's shape and size, not
+    // every field of every element. Per-element correctness is enforced by
+    // the client UI (the teacher reviews/edits before posting) rather than
+    // the rules, consistent with the rest of this app's no-login trust model.
     function isValidHomeworkQuestions(list) {
-      return list is list && list.size() > 0 && list.size() <= 50
-        && list.filter(q, isValidHomeworkQuestion(q)).size() == list.size();
+      return list is list && list.size() > 0 && list.size() <= 50;
     }
-    function isValidHomeworkQuestion(q) {
-      return q is map && q.keys().hasAll(['id', 'text'])
-        && q.id is string && q.id.size() > 0 && q.id.size() < 40
-        && q.text is string && q.text.size() > 0 && q.text.size() < 500;
+    // Worksheet-mode items (imported from a PDF, edited by the teacher):
+    // fill-in-the-blank / short-answer / multiple-choice questions.
+    function isValidHomeworkItems(list) {
+      return list is list && list.size() > 0 && list.size() <= 40;
     }
     function isValidHomeworkSubmission(data) {
       return data.keys().hasAll(['studentName', 'text', 'attemptCount', 'submittedAt'])
