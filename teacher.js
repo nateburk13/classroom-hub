@@ -1151,17 +1151,26 @@ function parseWorksheetText(rawText){
   const numberRe = /^(\d{1,2})[\.\)]\s+(.*)$/;
   const mcOptRe = /^\(?([A-Da-d])[\.\)]\s+(.*)$/;
   const blankRe = /_{3,}/;
+  // Many worksheet PDFs (e.g. K5 Learning-style handouts) append an answer
+  // key page that re-numbers the same items with blanks filled in. Once we
+  // hit a heading like "Answers" / "Answer key", switch to reading that
+  // section separately so it can populate the teacher-only correctAnswer
+  // field instead of being extracted as a second set of questions.
+  const answerHeadingRe = /^answer(s)?( key)?:?$/i;
   const items = [];
+  const answerLines = []; // raw sentence text from the answer-key section, in order
   let current = null;
+  let inAnswers = false;
 
   function pushCurrent(){
     if(!current) return;
     const stemJoined = current.stemParts.join(' ').replace(/\s+/g,' ').trim();
+    const blankMatch = stemJoined.match(blankRe);
     let type, stem;
     if(current.options.length >= 2){
       type = 'mc';
       stem = stemJoined;
-    }else if(blankRe.test(stemJoined)){
+    }else if(blankMatch){
       type = 'blank';
       stem = stemJoined.replace(blankRe, '{{blank}}');
     }else{
@@ -1170,7 +1179,7 @@ function parseWorksheetText(rawText){
     }
     if(stem){
       items.push({
-        id: newQuestionId(), type, stem,
+        id: newQuestionId(), type, stem, rawStem: stemJoined,
         options: current.options.map(o=> o.text),
         correctAnswer: ''
       });
@@ -1178,21 +1187,81 @@ function parseWorksheetText(rawText){
     current = null;
   }
 
+  function pushAnswerCurrent(){
+    if(!current) return;
+    const line = current.stemParts.join(' ').replace(/\s+/g,' ').trim();
+    if(line) answerLines.push(line);
+    current = null;
+  }
+
   lines.forEach(line=>{
+    if(answerHeadingRe.test(line)){
+      if(inAnswers) pushAnswerCurrent(); else pushCurrent();
+      inAnswers = true;
+      return;
+    }
     const numMatch = line.match(numberRe);
     const optMatch = line.match(mcOptRe);
     if(numMatch){
-      pushCurrent();
+      if(inAnswers) pushAnswerCurrent(); else pushCurrent();
       current = { stemParts: [numMatch[2]], options: [] };
-    }else if(optMatch && current){
+    }else if(optMatch && current && !inAnswers){
       current.options.push({ letter: optMatch[1].toUpperCase(), text: optMatch[2] });
     }else if(current){
       current.stemParts.push(line);
     }
     // lines before the first numbered item (titles, general instructions) are skipped
   });
-  pushCurrent();
-  return items.slice(0, 40);
+  if(inAnswers) pushAnswerCurrent(); else pushCurrent();
+
+  // Fallback safety net: if an answer-key heading wasn't found (different
+  // phrasing/layout) but the same stems repeat later in the document, the
+  // numbering restarts at 1 with near-identical text — drop later
+  // duplicates so a stray answer page still doesn't double the list.
+  const seen = new Set();
+  const deduped = [];
+  for(const it of items){
+    const key = it.stem.toLowerCase().replace(/[^a-z0-9]+/g,' ').replace(/\{\{blank\}\}/g,'').trim();
+    if(seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(it);
+  }
+  const finalItems = deduped.slice(0, 40);
+
+  // Match each question to its answer-key line by position and derive the
+  // teacher-only correctAnswer. This is best-effort text extraction, so the
+  // teacher still reviews/edits every field before posting.
+  finalItems.forEach((it, i)=>{
+    const answerLine = answerLines[i];
+    if(!answerLine) return;
+    if(it.type === 'mc' && it.options.length){
+      const norm = s=> s.toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();
+      const match = it.options.find(o=> norm(answerLine).includes(norm(o)));
+      it.correctAnswer = match || '';
+    }else if(it.type === 'blank'){
+      const blankMatch = it.rawStem.match(blankRe);
+      if(blankMatch){
+        const prefix = it.rawStem.slice(0, blankMatch.index).trim();
+        const suffix = it.rawStem.slice(blankMatch.index + blankMatch[0].length).trim();
+        const normPrefix = prefix.toLowerCase();
+        const normSuffix = suffix.toLowerCase();
+        const normAnswer = answerLine.toLowerCase();
+        if(normAnswer.startsWith(normPrefix) && (!suffix || normAnswer.endsWith(normSuffix))){
+          const inserted = answerLine.slice(prefix.length, answerLine.length - suffix.length).trim();
+          it.correctAnswer = inserted || answerLine;
+        }else{
+          it.correctAnswer = answerLine;
+        }
+      }else{
+        it.correctAnswer = answerLine;
+      }
+    }else{
+      it.correctAnswer = answerLine;
+    }
+    delete it.rawStem;
+  });
+
+  return finalItems;
 }
 
 async function toggleGrammarResponses(hwId){
