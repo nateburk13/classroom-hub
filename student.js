@@ -643,6 +643,12 @@ function statusForHomework(h){
   return { cls:'assigned', label:'assigned' };
 }
 
+// True once a student has used up every resubmission the teacher allowed
+// (h.maxAttempts is null/undefined for unlimited resubmissions).
+function attemptsExhausted(h, sub){
+  return !!(h.maxAttempts && sub && (sub.attemptCount || 1) >= h.maxAttempts);
+}
+
 /* Writing tab: students write directly in the page instead of a popup, with
    a live word count and an autosaved local draft. Resubmitting just updates
    the same doc and bumps attemptCount, same as the other homework types. */
@@ -651,12 +657,13 @@ function renderWritingStudentCard(h){
   const status = statusForHomework(h);
   const overdue = h.dueDate && new Date(h.dueDate) < new Date(new Date().toDateString());
   const expanded = !!hwExpanded[h.id];
+  const locked = attemptsExhausted(h, sub);
 
   let card = `<div class="card">
     <div class="card-row">
       <div>
         <h3>${escapeHtml(h.title)}</h3>
-        <div class="meta">${h.dueDate ? `Due ${h.dueDate}` : 'No due date'}</div>
+        <div class="meta">${h.dueDate ? `Due ${h.dueDate}` : 'No due date'}${h.maxAttempts ? ` · ${h.maxAttempts} attempt${h.maxAttempts===1?'':'s'} allowed` : ''}</div>
         <p class="body-text">${escapeHtml(h.instructions)}</p>
         ${h.attachmentUrl ? `<a href="${h.attachmentUrl}" download="${escapeHtml(h.attachmentName || 'attachment')}" class="meta" style="color:var(--forest);text-decoration:underline;">📎 ${escapeHtml(h.attachmentName || 'attachment')}</a>` : ''}
       </div>
@@ -664,10 +671,14 @@ function renderWritingStudentCard(h){
     </div>`;
 
   if(sub && !expanded){
-    card += `<div class="meta" style="margin-top:8px;">Last saved ${timeAgo(tsVal(sub.submittedAt))} (attempt ${sub.attemptCount || 1})</div>`;
+    card += `<div class="meta" style="margin-top:8px;">Last saved ${timeAgo(tsVal(sub.submittedAt))} (attempt ${sub.attemptCount || 1}${h.maxAttempts ? ` of ${h.maxAttempts}` : ''})</div>`;
   }
 
-  if(overdue && !expanded){
+  if(locked && !expanded){
+    card += `<div class="meta" style="margin-top:6px;">You've used all your allowed attempts — your last submission is locked in.</div>
+       <div class="body-text" style="white-space:pre-wrap;background:var(--cream);border-radius:8px;padding:10px 12px;margin-top:6px;">${escapeHtml(sub.text || '')}</div>
+       ${sub.attachmentUrl ? `<a href="${sub.attachmentUrl}" download="${escapeHtml(sub.attachmentName || 'file')}" class="meta">📎 your uploaded file</a>` : ''}`;
+  }else if(overdue && !expanded){
     card += sub
       ? `<div class="meta" style="margin-top:6px;">Due date passed — your last submission is locked in.</div>
          <div class="body-text" style="white-space:pre-wrap;background:var(--cream);border-radius:8px;padding:10px 12px;margin-top:6px;">${escapeHtml(sub.text || '')}</div>
@@ -718,7 +729,9 @@ function wireWritingStudentCards(){
 }
 
 async function saveWritingSubmission(hwId){
+  const h = homework.find(x=> x.id === hwId);
   const existing = myHwSubmissions[hwId];
+  if(h && attemptsExhausted(h, existing)){ render(); return; }
   const ta = document.getElementById('wr-text-' + hwId);
   const fileInput = document.getElementById('wr-file-' + hwId);
   const err = document.getElementById('wr-error-' + hwId);
@@ -769,6 +782,7 @@ function renderWorksheetStudentCard(h){
   const status = statusForHomework(h);
   const overdue = h.dueDate && new Date(h.dueDate) < new Date(new Date().toDateString());
   const expanded = !!hwExpanded[h.id];
+  const locked = attemptsExhausted(h, sub);
   const items = h.items || [];
   const answeredCount = sub && sub.answers ? items.filter(it=> (sub.answers[it.id] || '').trim()).length : 0;
 
@@ -776,17 +790,19 @@ function renderWorksheetStudentCard(h){
     <div class="card-row">
       <div>
         <h3>${escapeHtml(h.title)}</h3>
-        <div class="meta">${h.dueDate ? `Due ${h.dueDate}` : 'No due date'} · ${items.length} question${items.length === 1 ? '' : 's'}</div>
+        <div class="meta">${h.dueDate ? `Due ${h.dueDate}` : 'No due date'} · ${items.length} question${items.length === 1 ? '' : 's'}${h.maxAttempts ? ` · ${h.maxAttempts} attempt${h.maxAttempts===1?'':'s'} allowed` : ''}</div>
         ${h.instructions ? `<p class="body-text">${escapeHtml(h.instructions)}</p>` : ''}
       </div>
       <span class="stamp ${status.cls}">${status.label}</span>
     </div>`;
 
   if(sub && !expanded){
-    card += `<div class="meta" style="margin-top:8px;">Answered ${answeredCount}/${items.length} · last saved ${timeAgo(tsVal(sub.submittedAt))} (attempt ${sub.attemptCount || 1})</div>`;
+    card += `<div class="meta" style="margin-top:8px;">Answered ${answeredCount}/${items.length} · last saved ${timeAgo(tsVal(sub.submittedAt))} (attempt ${sub.attemptCount || 1}${h.maxAttempts ? ` of ${h.maxAttempts}` : ''})</div>`;
   }
 
-  if(overdue && !expanded){
+  if(locked && !expanded){
+    card += `<div class="meta" style="margin-top:6px;">You've used all your allowed attempts — your last answers are locked in.</div>`;
+  }else if(overdue && !expanded){
     card += sub
       ? `<div class="meta" style="margin-top:6px;">Due date passed — your last answers are locked in.</div>`
       : `<div class="form-actions"><span class="meta">Due date passed — no longer accepting submissions.</span></div>`;
@@ -861,7 +877,9 @@ function wireWorksheetStudentCards(){
 }
 
 async function saveWorksheetSubmission(hwId){
+  const h = homework.find(x=> x.id === hwId);
   const existing = myHwSubmissions[hwId];
+  if(h && attemptsExhausted(h, existing)){ render(); return; }
   const saveBtn = document.querySelector(`[data-hw-save-ws="${hwId}"]`);
   const card = saveBtn.closest('.card');
   const answers = {};
@@ -900,6 +918,7 @@ function renderQuestionsStudentCard(h){
   const status = statusForHomework(h);
   const overdue = h.dueDate && new Date(h.dueDate) < new Date(new Date().toDateString());
   const expanded = !!hwExpanded[h.id];
+  const locked = attemptsExhausted(h, sub);
   const questions = h.questions || [];
   const answeredCount = sub && sub.answers ? questions.filter(q=> (sub.answers[q.id] || '').trim()).length : 0;
 
@@ -907,7 +926,7 @@ function renderQuestionsStudentCard(h){
     <div class="card-row">
       <div>
         <h3>${escapeHtml(h.title)}</h3>
-        <div class="meta">${h.dueDate ? `Due ${h.dueDate}` : 'No due date'} · ${questions.length} question${questions.length === 1 ? '' : 's'}</div>
+        <div class="meta">${h.dueDate ? `Due ${h.dueDate}` : 'No due date'} · ${questions.length} question${questions.length === 1 ? '' : 's'}${h.maxAttempts ? ` · ${h.maxAttempts} attempt${h.maxAttempts===1?'':'s'} allowed` : ''}</div>
         ${h.instructions ? `<p class="body-text">${escapeHtml(h.instructions)}</p>` : ''}
         ${h.attachmentUrl ? `<a href="${h.attachmentUrl}" download="${escapeHtml(h.attachmentName || 'attachment')}" class="meta" style="color:var(--forest);text-decoration:underline;">📎 ${escapeHtml(h.attachmentName || 'attachment')}</a>` : ''}
       </div>
@@ -915,10 +934,12 @@ function renderQuestionsStudentCard(h){
     </div>`;
 
   if(sub && !expanded){
-    card += `<div class="meta" style="margin-top:8px;">Answered ${answeredCount}/${questions.length} · last saved ${timeAgo(tsVal(sub.submittedAt))} (attempt ${sub.attemptCount || 1})</div>`;
+    card += `<div class="meta" style="margin-top:8px;">Answered ${answeredCount}/${questions.length} · last saved ${timeAgo(tsVal(sub.submittedAt))} (attempt ${sub.attemptCount || 1}${h.maxAttempts ? ` of ${h.maxAttempts}` : ''})</div>`;
   }
 
-  if(overdue && !expanded){
+  if(locked && !expanded){
+    card += `<div class="meta" style="margin-top:6px;">You've used all your allowed attempts — your last answers are locked in.</div>`;
+  }else if(overdue && !expanded){
     card += sub
       ? `<div class="meta" style="margin-top:6px;">Due date passed — your last answers are locked in.</div>`
       : `<div class="form-actions"><span class="meta">Due date passed — no longer accepting submissions.</span></div>`;
@@ -973,7 +994,9 @@ function wireQuestionsStudentCards(){
 }
 
 async function saveQuestionsSubmission(hwId){
+  const h = homework.find(x=> x.id === hwId);
   const existing = myHwSubmissions[hwId];
+  if(h && attemptsExhausted(h, existing)){ render(); return; }
   const saveBtn = document.querySelector(`[data-hw-save-q="${hwId}"]`);
   const card = saveBtn.closest('.card');
   const answers = {};

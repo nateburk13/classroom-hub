@@ -674,7 +674,7 @@ function renderHomework(){
         <div class="card-row">
           <div>
             <h3>${escapeHtml(h.title)}</h3>
-            <div class="meta">${h.dueDate ? `Due ${h.dueDate} · ` : 'No due date · '}${h.submissionCount} submitted</div>
+            <div class="meta">${h.dueDate ? `Due ${h.dueDate} · ` : 'No due date · '}${h.submissionCount} submitted${h.maxAttempts ? ` · ${h.maxAttempts} attempt${h.maxAttempts===1?'':'s'} allowed` : ''}</div>
             <p class="body-text">${escapeHtml(h.instructions)}</p>
             ${h.attachmentUrl ? `<a href="${h.attachmentUrl}" download="${escapeHtml(h.attachmentName || 'attachment')}" class="meta" style="color:var(--forest);text-decoration:underline;">📎 ${escapeHtml(h.attachmentName || 'attachment')}</a>` : ''}
           </div>
@@ -736,6 +736,9 @@ function renderWritingTeacherView(items){
       <div class="field"><label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="wp-has-due" style="width:auto;" checked> Has a due date</label>
         <input id="wp-due" type="date" value="${addDays(7)}">
       </div>
+      <div class="field"><label>Resubmissions allowed</label>
+        <input id="wp-max-attempts" type="number" min="1" placeholder="Leave blank for unlimited">
+      </div>
       <div class="field"><label>Attach a reference file or image (optional)</label><input id="wp-file" type="file" accept="image/*,.pdf,.doc,.docx"></div>
       <div class="form-actions"><button class="btn small" id="wp-cancel">Cancel</button><button class="btn primary small" id="wp-save">Post prompt</button></div>
       <div class="gate-error" id="wp-error"></div>
@@ -752,7 +755,7 @@ function renderWritingTeacherView(items){
         <div class="card-row">
           <div>
             <h3>${escapeHtml(h.title)}</h3>
-            <div class="meta">${h.dueDate ? `Due ${h.dueDate} · ` : 'No due date · '}${h.submissionCount} submitted</div>
+            <div class="meta">${h.dueDate ? `Due ${h.dueDate} · ` : 'No due date · '}${h.submissionCount} submitted${h.maxAttempts ? ` · ${h.maxAttempts} attempt${h.maxAttempts===1?'':'s'} allowed` : ''}</div>
             <p class="body-text">${escapeHtml(h.instructions)}</p>
             ${h.attachmentUrl ? `<a href="${h.attachmentUrl}" download="${escapeHtml(h.attachmentName || 'attachment')}" class="meta" style="color:var(--forest);text-decoration:underline;">📎 ${escapeHtml(h.attachmentName || 'attachment')}</a>` : ''}
           </div>
@@ -784,11 +787,13 @@ function wireWritingTeacherView(){
         const file = document.getElementById('wp-file').files[0];
         const attachmentUrl = file ? await fileToAttachment(file) : null;
         const hasDue = document.getElementById('wp-has-due').checked;
+        const maxAttemptsRaw = parseInt(document.getElementById('wp-max-attempts').value, 10);
         await db.collection('classes').doc(classId).collection('homework').add({
           category: 'writing',
           title,
           instructions: document.getElementById('wp-instr').value.trim(),
           dueDate: hasDue ? (document.getElementById('wp-due').value || addDays(7)) : null,
+          maxAttempts: (Number.isFinite(maxAttemptsRaw) && maxAttemptsRaw > 0) ? maxAttemptsRaw : null,
           attachmentName: file ? file.name : null,
           attachmentUrl,
           createdAt: firebase.firestore.FieldValue.serverTimestamp()
@@ -863,6 +868,9 @@ function renderGrammarTeacherView(items, category){
       <div class="field"><label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="gr-has-due" style="width:auto;" checked> Has a due date</label>
         <input id="gr-due" type="date" value="${addDays(7)}">
       </div>
+      <div class="field"><label>Resubmissions allowed</label>
+        <input id="gr-max-attempts" type="number" min="1" placeholder="Leave blank for unlimited">
+      </div>
       <div class="field" id="gr-file-wrap"><label>Attach a file (optional)</label><input id="gr-file" type="file" accept="image/*,.pdf,.doc,.docx"></div>
       <div class="form-actions"><button class="btn small" id="gr-cancel">Cancel</button><button class="btn primary small" id="gr-save">Post homework</button></div>
       <div class="gate-error" id="gr-error"></div>
@@ -882,7 +890,7 @@ function renderGrammarTeacherView(items, category){
         <div class="card-row">
           <div>
             <h3>${escapeHtml(h.title)}</h3>
-            <div class="meta">${h.dueDate ? `Due ${h.dueDate} · ` : 'No due date · '}${h.submissionCount} submitted · ${formatLabel}</div>
+            <div class="meta">${h.dueDate ? `Due ${h.dueDate} · ` : 'No due date · '}${h.submissionCount} submitted · ${formatLabel}${h.maxAttempts ? ` · ${h.maxAttempts} attempt${h.maxAttempts===1?'':'s'} allowed` : ''}</div>
             ${h.instructions ? `<p class="body-text">${escapeHtml(h.instructions)}</p>` : ''}
             ${isQ ? `<ol style="margin:6px 0 0;padding-left:18px;font-size:13px;color:var(--forest);">${(h.questions||[]).map(q=> `<li>${escapeHtml(q.text)}</li>`).join('')}</ol>` : ''}
             ${isWs ? `<ol style="margin:6px 0 0;padding-left:18px;font-size:13px;color:var(--forest);">${(h.items||[]).map(it=> `<li>${escapeHtml((it.stem||'').replace('{{blank}}','____'))}</li>`).join('')}</ol>` : ''}
@@ -1097,6 +1105,7 @@ function wireGrammarTeacherView(category){
           title,
           instructions: document.getElementById('gr-instr').value.trim(),
           dueDate: hasDue ? (document.getElementById('gr-due').value || addDays(7)) : null,
+          maxAttempts: (()=>{ const v = parseInt(document.getElementById('gr-max-attempts').value, 10); return (Number.isFinite(v) && v > 0) ? v : null; })(),
           attachmentName,
           attachmentUrl,
           createdAt: firebase.firestore.FieldValue.serverTimestamp()
