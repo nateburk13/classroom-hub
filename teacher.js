@@ -260,7 +260,7 @@ function teardownListeners(){
   Whiteboard.teardown();
   assignments = []; announcements = []; quizzes = []; books = []; homework = []; presence = [];
   loaded = { assignments: false, announcements: false, quizzes: false, books: false, homework: false, students: false };
-  showNewHwForm = false; hwResponsesExpanded = {};
+  showNewHwForm = false; hwResponsesExpanded = {}; hwResponsesHtml = {};
   showNewGrammarForm = false;
 }
 
@@ -302,6 +302,8 @@ let currentHwCategory = 'grammar';
 // prompt form is open, and which prompts have their responses expanded.
 let showNewHwForm = false;
 let hwResponsesExpanded = {};
+let hwResponsesHtml = {}; // cache of the last-rendered responses list per homework id, so
+// background re-renders (e.g. from presence heartbeats) don't wipe the panel back to "Loading…"
 // Inline "Grammar"/"Vocab" ('builder' style) state (see renderGrammarTeacherView):
 // whether the new-homework form is open. Responses reuse hwResponsesExpanded above.
 let showNewGrammarForm = false;
@@ -892,7 +894,7 @@ function renderGrammarTeacherView(items, category){
           <button class="btn small" data-gr-toggle="${h.id}">${expanded ? 'Hide responses' : 'View responses'}</button>
           <button class="btn small danger" data-hw-delete="${h.id}">Delete</button>
         </div>
-        <div id="gr-responses-${h.id}">${expanded ? '<p class="meta" style="margin-top:10px;">Loading…</p>' : ''}</div>
+        <div id="gr-responses-${h.id}">${expanded ? (hwResponsesHtml[h.id] || '<p class="meta" style="margin-top:10px;">Loading…</p>') : ''}</div>
       </div>`;
     });
   }
@@ -1267,13 +1269,17 @@ function parseWorksheetText(rawText){
 async function toggleGrammarResponses(hwId){
   const wasExpanded = !!hwResponsesExpanded[hwId];
   hwResponsesExpanded[hwId] = !wasExpanded;
-  if(wasExpanded){ render(); return; }
+  if(wasExpanded){ delete hwResponsesHtml[hwId]; render(); return; }
   render(); // shows the "Loading…" placeholder immediately
   const h = homework.find(x=> x.id === hwId);
   const subsSnap = await db.collection('classes').doc(classId).collection('homework').doc(hwId).collection('submissions').get();
-  const container = document.getElementById('gr-responses-' + hwId);
-  if(!container) return; // user switched tabs before this resolved
-  if(subsSnap.empty){ container.innerHTML = '<p class="meta" style="margin-top:10px;">No responses yet.</p>'; return; }
+  if(!hwResponsesExpanded[hwId]) return; // panel was collapsed again before this resolved
+  if(subsSnap.empty){
+    hwResponsesHtml[hwId] = '<p class="meta" style="margin-top:10px;">No responses yet.</p>';
+    const container = document.getElementById('gr-responses-' + hwId);
+    if(container) container.innerHTML = hwResponsesHtml[hwId];
+    return;
+  }
   const docs = [...subsSnap.docs].sort((a,b)=> (a.data().studentName || '').localeCompare(b.data().studentName || ''));
   const isQ = h && h.mode === 'questions';
   const isWs = h && h.mode === 'worksheet';
@@ -1310,7 +1316,9 @@ async function toggleGrammarResponses(hwId){
     </div>`;
   });
   html += '</div>';
-  container.innerHTML = html;
+  hwResponsesHtml[hwId] = html;
+  const container = document.getElementById('gr-responses-' + hwId);
+  if(container) container.innerHTML = html; // avoids waiting for the next full render()
 }
 
 function renderQuizzes(){
