@@ -262,6 +262,7 @@ function teardownListeners(){
   loaded = { assignments: false, announcements: false, quizzes: false, books: false, homework: false, students: false };
   showNewHwForm = false; hwResponsesExpanded = {}; hwResponsesHtml = {};
   showNewGrammarForm = false;
+  editingHwId = null;
 }
 
 /* --------------------------- 2. STATE --------------------------- */
@@ -307,6 +308,7 @@ let hwResponsesHtml = {}; // cache of the last-rendered responses list per homew
 // Inline "Grammar"/"Vocab" ('builder' style) state (see renderGrammarTeacherView):
 // whether the new-homework form is open. Responses reuse hwResponsesExpanded above.
 let showNewGrammarForm = false;
+let editingHwId = null; // set while the writing/grammar form above is editing an existing homework item instead of creating a new one
 const PRESENCE_ONLINE_MS = 60000; // no heartbeat within this window = shown offline
 const TEACHER_PRESENCE_ID = '__teacher__';
 let teacherPresenceInterval = null;
@@ -741,17 +743,20 @@ function renderWritingTeacherView(items){
   let html = `<div class="section-head"><div></div><button class="btn primary small" id="btn-toggle-writing-form">${showNewHwForm ? 'Cancel' : 'New writing prompt'}</button></div>`;
 
   if(showNewHwForm){
+    const editing = items.find(x=> x.id === editingHwId);
     html += `<div class="card">
-      <div class="field"><label>Title</label><input id="wp-title" placeholder="Descriptive paragraph"></div>
-      <div class="field"><label>Prompt / instructions</label><textarea id="wp-instr" rows="4" placeholder="Write a paragraph describing your favorite place. Include at least 3 sensory details."></textarea></div>
-      <div class="field"><label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="wp-has-due" style="width:auto;" checked> Has a due date</label>
-        <input id="wp-due" type="date" value="${addDays(7)}">
+      <div class="field"><label>Title</label><input id="wp-title" placeholder="Descriptive paragraph" value="${editing ? escapeHtml(editing.title) : ''}"></div>
+      <div class="field"><label>Prompt / instructions</label><textarea id="wp-instr" rows="4" placeholder="Write a paragraph describing your favorite place. Include at least 3 sensory details.">${editing ? escapeHtml(editing.instructions || '') : ''}</textarea></div>
+      <div class="field"><label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="wp-has-due" style="width:auto;" ${(!editing || editing.dueDate) ? 'checked' : ''}> Has a due date</label>
+        <input id="wp-due" type="date" value="${editing && editing.dueDate ? editing.dueDate : addDays(7)}" ${editing && !editing.dueDate ? 'disabled' : ''}>
       </div>
       <div class="field"><label>Resubmissions allowed</label>
-        <input id="wp-max-attempts" type="number" min="1" placeholder="Leave blank for unlimited">
+        <input id="wp-max-attempts" type="number" min="1" placeholder="Leave blank for unlimited" value="${editing && editing.maxAttempts ? editing.maxAttempts : ''}">
       </div>
-      <div class="field"><label>Attach a reference file or image (optional)</label><input id="wp-file" type="file" accept="image/*,.pdf,.doc,.docx"></div>
-      <div class="form-actions"><button class="btn small" id="wp-cancel">Cancel</button><button class="btn primary small" id="wp-save">Post prompt</button></div>
+      <div class="field"><label>Attach a reference file or image (optional)</label><input id="wp-file" type="file" accept="image/*,.pdf,.doc,.docx">
+        ${editing && editing.attachmentUrl ? `<div class="meta" style="margin-top:4px;">Current file: ${escapeHtml(editing.attachmentName || 'attachment')} — choosing a new one replaces it.</div>` : ''}
+      </div>
+      <div class="form-actions"><button class="btn small" id="wp-cancel">Cancel</button><button class="btn primary small" id="wp-save">${editing ? 'Save changes' : 'Post prompt'}</button></div>
       <div class="gate-error" id="wp-error"></div>
     </div>`;
   }
@@ -774,6 +779,7 @@ function renderWritingTeacherView(items){
         </div>
         <div class="form-actions">
           <button class="btn small" data-wr-toggle="${h.id}">${expanded ? 'Hide responses' : 'View responses'}</button>
+          <button class="btn small" data-hw-edit="${h.id}">Edit</button>
           <button class="btn small danger" data-hw-delete="${h.id}">Delete</button>
         </div>
         <div id="wr-responses-${h.id}">${expanded ? '<p class="meta" style="margin-top:10px;">Loading…</p>' : ''}</div>
@@ -784,39 +790,55 @@ function renderWritingTeacherView(items){
 }
 
 function wireWritingTeacherView(){
-  document.getElementById('btn-toggle-writing-form').onclick = ()=>{ showNewHwForm = !showNewHwForm; render(); };
+  document.getElementById('btn-toggle-writing-form').onclick = ()=>{
+    showNewHwForm = !showNewHwForm;
+    if(!showNewHwForm) editingHwId = null;
+    render();
+  };
   if(showNewHwForm){
     document.getElementById('wp-has-due').onchange = (e)=>{ document.getElementById('wp-due').disabled = !e.target.checked; };
-    document.getElementById('wp-cancel').onclick = ()=>{ showNewHwForm = false; render(); };
+    document.getElementById('wp-cancel').onclick = ()=>{ showNewHwForm = false; editingHwId = null; render(); };
     document.getElementById('wp-save').onclick = async ()=>{
       const title = document.getElementById('wp-title').value.trim();
       const err = document.getElementById('wp-error');
       if(!title){ err.textContent = 'Give the prompt a title.'; return; }
       const saveBtn = document.getElementById('wp-save');
+      const editing = homework.find(x=> x.id === editingHwId);
       saveBtn.disabled = true; saveBtn.textContent = 'Saving…'; err.textContent = '';
       try{
         const file = document.getElementById('wp-file').files[0];
-        const attachmentUrl = file ? await fileToAttachment(file) : null;
         const hasDue = document.getElementById('wp-has-due').checked;
         const maxAttemptsRaw = parseInt(document.getElementById('wp-max-attempts').value, 10);
-        await db.collection('classes').doc(classId).collection('homework').add({
+        const doc = {
           category: 'writing',
           title,
           instructions: document.getElementById('wp-instr').value.trim(),
           dueDate: hasDue ? (document.getElementById('wp-due').value || addDays(7)) : null,
-          maxAttempts: (Number.isFinite(maxAttemptsRaw) && maxAttemptsRaw > 0) ? maxAttemptsRaw : null,
-          attachmentName: file ? file.name : null,
-          attachmentUrl,
-          createdAt: firebase.firestore.FieldValue.serverTimestamp()
-        });
+          maxAttempts: (Number.isFinite(maxAttemptsRaw) && maxAttemptsRaw > 0) ? maxAttemptsRaw : null
+        };
+        if(file){
+          doc.attachmentUrl = await fileToAttachment(file);
+          doc.attachmentName = file.name;
+        }else if(!editing){
+          doc.attachmentUrl = null;
+          doc.attachmentName = null;
+        } // else: editing an existing prompt with no new file chosen — leave its attachment untouched
+        if(editing){
+          await db.collection('classes').doc(classId).collection('homework').doc(editing.id).update(doc);
+        }else{
+          doc.createdAt = firebase.firestore.FieldValue.serverTimestamp();
+          await db.collection('classes').doc(classId).collection('homework').add(doc);
+        }
         showNewHwForm = false;
+        editingHwId = null;
       }catch(e){
-        saveBtn.disabled = false; saveBtn.textContent = 'Post prompt';
+        saveBtn.disabled = false; saveBtn.textContent = editing ? 'Save changes' : 'Post prompt';
         err.textContent = e.message || "Couldn't save — check your connection and try again.";
       }
     };
   }
   viewRoot.querySelectorAll('[data-wr-toggle]').forEach(b=> b.onclick = ()=> toggleWritingResponses(b.dataset.wrToggle));
+  viewRoot.querySelectorAll('[data-hw-edit]').forEach(b=> b.onclick = ()=>{ editingHwId = b.dataset.hwEdit; showNewHwForm = true; render(); });
   viewRoot.querySelectorAll('[data-hw-delete]').forEach(b=> b.onclick = ()=> deleteHomework(b.dataset.hwDelete));
 }
 
@@ -848,19 +870,21 @@ async function toggleWritingResponses(hwId){
 // inline. Both live in the same `homework` doc via the `mode` field. ----
 function renderGrammarTeacherView(items, category){
   const catLabel = (HOMEWORK_CATEGORIES.find(c=> c.id === category) || {}).label || 'homework';
+  const editing = items.find(x=> x.id === editingHwId);
   let html = `<div class="section-head"><div></div><button class="btn primary small" id="btn-toggle-grammar-form">${showNewGrammarForm ? 'Cancel' : `New ${catLabel.toLowerCase()} homework`}</button></div>`;
 
   if(showNewGrammarForm){
     html += `<div class="card">
       <div class="field"><label>Format</label>
-        <select id="gr-mode">
-          <option value="prompt">Single prompt — student writes a general response</option>
-          <option value="questions">List of questions — student answers each one</option>
-          <option value="worksheet">Import from PDF — auto-build fill-in-the-blank / multiple choice questions</option>
+        <select id="gr-mode" ${editing ? 'disabled' : ''}>
+          <option value="prompt" ${editing && editing.mode==='prompt' ? 'selected' : ''}>Single prompt — student writes a general response</option>
+          <option value="questions" ${editing && editing.mode==='questions' ? 'selected' : ''}>List of questions — student answers each one</option>
+          <option value="worksheet" ${editing && editing.mode==='worksheet' ? 'selected' : ''}>Import from PDF — auto-build fill-in-the-blank / multiple choice questions</option>
         </select>
+        ${editing ? '<p class="meta" style="margin-top:4px;">Format can\'t be changed once posted — delete and recreate if you need a different format.</p>' : ''}
       </div>
-      <div class="field"><label>Title</label><input id="gr-title" placeholder="Subject-verb agreement"></div>
-      <div class="field" id="gr-instr-wrap"><label>Instructions / prompt</label><textarea id="gr-instr" rows="3" placeholder="What should students do?"></textarea></div>
+      <div class="field"><label>Title</label><input id="gr-title" placeholder="Subject-verb agreement" value="${editing ? escapeHtml(editing.title) : ''}"></div>
+      <div class="field" id="gr-instr-wrap"><label>Instructions / prompt</label><textarea id="gr-instr" rows="3" placeholder="What should students do?">${editing ? escapeHtml(editing.instructions || '') : ''}</textarea></div>
       <div class="field hidden" id="gr-questions-wrap">
         <label>Questions</label>
         <div id="gr-questions-list"></div>
@@ -876,14 +900,16 @@ function renderGrammarTeacherView(items, category){
         <div id="gr-ws-items" style="margin-top:10px;"></div>
         <button type="button" class="btn small hidden" id="gr-ws-add-item" style="margin-top:6px;">+ Add question manually</button>
       </div>
-      <div class="field"><label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="gr-has-due" style="width:auto;" checked> Has a due date</label>
-        <input id="gr-due" type="date" value="${addDays(7)}">
+      <div class="field"><label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="gr-has-due" style="width:auto;" ${(!editing || editing.dueDate) ? 'checked' : ''}> Has a due date</label>
+        <input id="gr-due" type="date" value="${editing && editing.dueDate ? editing.dueDate : addDays(7)}" ${editing && !editing.dueDate ? 'disabled' : ''}>
       </div>
       <div class="field"><label>Resubmissions allowed</label>
-        <input id="gr-max-attempts" type="number" min="1" placeholder="Leave blank for unlimited">
+        <input id="gr-max-attempts" type="number" min="1" placeholder="Leave blank for unlimited" value="${editing && editing.maxAttempts ? editing.maxAttempts : ''}">
       </div>
-      <div class="field" id="gr-file-wrap"><label>Attach a file (optional)</label><input id="gr-file" type="file" accept="image/*,.pdf,.doc,.docx"></div>
-      <div class="form-actions"><button class="btn small" id="gr-cancel">Cancel</button><button class="btn primary small" id="gr-save">Post homework</button></div>
+      <div class="field" id="gr-file-wrap"><label>Attach a file (optional)</label><input id="gr-file" type="file" accept="image/*,.pdf,.doc,.docx">
+        ${editing && editing.attachmentUrl ? `<div class="meta" style="margin-top:4px;">Current file: ${escapeHtml(editing.attachmentName || 'attachment')} — choosing a new one replaces it.</div>` : ''}
+      </div>
+      <div class="form-actions"><button class="btn small" id="gr-cancel">Cancel</button><button class="btn primary small" id="gr-save">${editing ? 'Save changes' : 'Post homework'}</button></div>
       <div class="gate-error" id="gr-error"></div>
     </div>`;
   }
@@ -911,6 +937,7 @@ function renderGrammarTeacherView(items, category){
         </div>
         <div class="form-actions">
           <button class="btn small" data-gr-toggle="${h.id}">${expanded ? 'Hide responses' : 'View responses'}</button>
+          <button class="btn small" data-hw-edit="${h.id}">Edit</button>
           <button class="btn small danger" data-hw-delete="${h.id}">Delete</button>
         </div>
         <div id="gr-responses-${h.id}">${expanded ? (hwResponsesHtml[h.id] || '<p class="meta" style="margin-top:10px;">Loading…</p>') : ''}</div>
@@ -921,9 +948,14 @@ function renderGrammarTeacherView(items, category){
 }
 
 function wireGrammarTeacherView(category){
-  document.getElementById('btn-toggle-grammar-form').onclick = ()=>{ showNewGrammarForm = !showNewGrammarForm; render(); };
+  document.getElementById('btn-toggle-grammar-form').onclick = ()=>{
+    showNewGrammarForm = !showNewGrammarForm;
+    if(!showNewGrammarForm) editingHwId = null;
+    render();
+  };
 
   if(showNewGrammarForm){
+    const editing = homework.find(x=> x.id === editingHwId);
     const modeSel = document.getElementById('gr-mode');
     const instrLabel = document.querySelector('#gr-instr-wrap label');
     const qWrap = document.getElementById('gr-questions-wrap');
@@ -933,13 +965,15 @@ function wireGrammarTeacherView(category){
 
     // Worksheet-mode builder state. Lives in this closure (like the quiz
     // builder modal) rather than module state, since the form is rebuilt
-    // fresh every time it's opened.
-    let wsItems = [];
+    // fresh every time it's opened. When editing an existing worksheet
+    // homework, seed it from the saved items instead of starting empty.
+    let wsItems = editing && editing.mode === 'worksheet' ? (editing.items || []).map(it=> ({ ...it, options: [...(it.options || [])] })) : [];
     let wsPageImage = null;
 
-    function addQuestionRow(){
+    function addQuestionRow(existingId){
       const row = document.createElement('div');
       row.style.cssText = 'display:flex;gap:6px;margin-bottom:6px;';
+      if(existingId) row.dataset.qid = existingId;
       row.innerHTML = `<input type="text" class="gr-question-input" placeholder="e.g. Circle the verb: The dog runs fast." style="flex:2;">
         <input type="text" class="gr-question-answer" placeholder="Correct answer (optional)" style="flex:1;">
         <button type="button" class="btn small danger">✕</button>`;
@@ -1023,9 +1057,27 @@ function wireGrammarTeacherView(category){
       instrLabel.textContent = isQ ? 'Instructions (optional)' : (isWs ? 'Instructions (optional)' : 'Instructions / prompt');
       if(isQ && qList.children.length === 0) addQuestionRow();
     };
-    document.getElementById('gr-add-question').onclick = addQuestionRow;
+    document.getElementById('gr-add-question').onclick = ()=> addQuestionRow();
     document.getElementById('gr-has-due').onchange = (e)=>{ document.getElementById('gr-due').disabled = !e.target.checked; };
-    document.getElementById('gr-cancel').onclick = ()=>{ showNewGrammarForm = false; render(); };
+    document.getElementById('gr-cancel').onclick = ()=>{ showNewGrammarForm = false; editingHwId = null; render(); };
+
+    // Prefill the right sub-section for whichever mode is selected —
+    // either the mode the teacher just picked, or (when editing) the
+    // format the homework was already saved as.
+    modeSel.onchange();
+    if(editing && editing.mode === 'questions'){
+      qList.innerHTML = '';
+      (editing.questions || []).forEach(q=>{
+        addQuestionRow(q.id);
+        const row = qList.lastElementChild;
+        row.querySelector('.gr-question-input').value = q.text || '';
+        row.querySelector('.gr-question-answer').value = q.correctAnswer || '';
+      });
+      if(qList.children.length === 0) addQuestionRow();
+    }
+    if(editing && editing.mode === 'worksheet'){
+      renderWsBuilder();
+    }
 
     document.getElementById('gr-ws-extract').onclick = async ()=>{
       const file = document.getElementById('gr-ws-file').files[0];
@@ -1084,11 +1136,12 @@ function wireGrammarTeacherView(category){
         const rows = Array.from(qList.children);
         questions = rows
           .map(row=>({
+            id: row.dataset.qid || null,
             text: row.querySelector('.gr-question-input').value.trim(),
             correctAnswer: row.querySelector('.gr-question-answer').value.trim()
           }))
           .filter(q=> q.text)
-          .map(q=> ({ id: newQuestionId(), text: q.text, correctAnswer: q.correctAnswer }));
+          .map(q=> ({ id: q.id || newQuestionId(), text: q.text, correctAnswer: q.correctAnswer }));
         if(questions.length === 0){ err.textContent = 'Add at least one question, or switch to single prompt.'; return; }
       }
       if(mode === 'worksheet'){
@@ -1110,12 +1163,16 @@ function wireGrammarTeacherView(category){
       saveBtn.disabled = true; saveBtn.textContent = 'Saving…'; err.textContent = '';
       try{
         const hasDue = document.getElementById('gr-has-due').checked;
-        let attachmentUrl = null;
-        let attachmentName = null;
+        let attachmentUrl, attachmentName;
         if(mode !== 'worksheet'){
           const file = document.getElementById('gr-file').files[0];
-          attachmentUrl = file ? await fileToAttachment(file) : null;
-          attachmentName = file ? file.name : null;
+          if(file){
+            attachmentUrl = await fileToAttachment(file);
+            attachmentName = file.name;
+          }else if(!editing){
+            attachmentUrl = null;
+            attachmentName = null;
+          } // else: editing with no new file chosen — leave the existing attachment untouched
         }
         const doc = {
           category,
@@ -1123,24 +1180,30 @@ function wireGrammarTeacherView(category){
           title,
           instructions: document.getElementById('gr-instr').value.trim(),
           dueDate: hasDue ? (document.getElementById('gr-due').value || addDays(7)) : null,
-          maxAttempts: (()=>{ const v = parseInt(document.getElementById('gr-max-attempts').value, 10); return (Number.isFinite(v) && v > 0) ? v : null; })(),
-          attachmentName,
-          attachmentUrl,
-          createdAt: firebase.firestore.FieldValue.serverTimestamp()
+          maxAttempts: (()=>{ const v = parseInt(document.getElementById('gr-max-attempts').value, 10); return (Number.isFinite(v) && v > 0) ? v : null; })()
         };
+        if(attachmentUrl !== undefined) doc.attachmentUrl = attachmentUrl;
+        if(attachmentName !== undefined) doc.attachmentName = attachmentName;
         if(mode === 'questions') doc.questions = questions;
         if(mode === 'worksheet') doc.items = wsItemsToSave;
-        await db.collection('classes').doc(classId).collection('homework').add(doc);
+        if(editing){
+          await db.collection('classes').doc(classId).collection('homework').doc(editing.id).update(doc);
+        }else{
+          doc.createdAt = firebase.firestore.FieldValue.serverTimestamp();
+          await db.collection('classes').doc(classId).collection('homework').add(doc);
+        }
         showNewGrammarForm = false;
+        editingHwId = null;
         render();
       }catch(e){
-        saveBtn.disabled = false; saveBtn.textContent = 'Post homework';
+        saveBtn.disabled = false; saveBtn.textContent = editing ? 'Save changes' : 'Post homework';
         err.textContent = e.message || "Couldn't save — check your connection and try again.";
       }
     };
   }
 
   viewRoot.querySelectorAll('[data-gr-toggle]').forEach(b=> b.onclick = ()=> toggleGrammarResponses(b.dataset.grToggle));
+  viewRoot.querySelectorAll('[data-hw-edit]').forEach(b=> b.onclick = ()=>{ editingHwId = b.dataset.hwEdit; showNewGrammarForm = true; render(); });
   viewRoot.querySelectorAll('[data-hw-delete]').forEach(b=> b.onclick = ()=> deleteHomework(b.dataset.hwDelete));
 }
 
