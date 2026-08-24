@@ -649,6 +649,32 @@ function attemptsExhausted(h, sub){
   return !!(h.maxAttempts && sub && (sub.attemptCount || 1) >= h.maxAttempts);
 }
 
+/* Auto-grading, mirrored from teacher.js so students see instant ✓/✗
+   feedback without waiting for the teacher to open the responses panel.
+   Only the correct/incorrect verdict is shown here — never the answer key
+   text itself, so a student can't peek at one blank's answer by comparing
+   text on-screen. Items with no correctAnswer set are 'ungraded' and shown
+   as neutral (the teacher is reviewing those by hand). */
+function normalizeAnswer(v){ return (v || '').toString().trim().toLowerCase().replace(/\s+/g,' '); }
+function gradeItem(item, given){
+  if(!item.correctAnswer) return 'ungraded';
+  if(!given) return 'wrong';
+  return normalizeAnswer(given) === normalizeAnswer(item.correctAnswer) ? 'correct' : 'wrong';
+}
+function scoreSubmission(list, answers){
+  let correct = 0, gradable = 0;
+  (list || []).forEach(it=>{
+    const g = gradeItem(it, answers && answers[it.id]);
+    if(g !== 'ungraded'){ gradable++; if(g === 'correct') correct++; }
+  });
+  return { correct, gradable, total: (list || []).length };
+}
+function gradeBadgeHtml(grade){
+  if(grade === 'correct') return `<span class="stamp submitted" style="margin-left:6px;">✓ correct</span>`;
+  if(grade === 'wrong') return `<span class="stamp overdue" style="margin-left:6px;">✗ incorrect</span>`;
+  return '';
+}
+
 /* Writing tab: students write directly in the page instead of a popup, with
    a live word count and an autosaved local draft. Resubmitting just updates
    the same doc and bumps attemptCount, same as the other homework types. */
@@ -797,7 +823,9 @@ function renderWorksheetStudentCard(h){
     </div>`;
 
   if(sub && !expanded){
-    card += `<div class="meta" style="margin-top:8px;">Answered ${answeredCount}/${items.length} · last saved ${timeAgo(tsVal(sub.submittedAt))} (attempt ${sub.attemptCount || 1}${h.maxAttempts ? ` of ${h.maxAttempts}` : ''})</div>`;
+    const score = scoreSubmission(items, sub.answers);
+    const scoreText = score.gradable > 0 ? ` · ${score.correct}/${score.gradable} correct` : '';
+    card += `<div class="meta" style="margin-top:8px;">Answered ${answeredCount}/${items.length} · last saved ${timeAgo(tsVal(sub.submittedAt))} (attempt ${sub.attemptCount || 1}${h.maxAttempts ? ` of ${h.maxAttempts}` : ''})${scoreText}</div>`;
   }
 
   if(locked && !expanded){
@@ -816,16 +844,18 @@ function renderWorksheetStudentCard(h){
     }
     card += `<div style="margin-top:12px;display:flex;flex-direction:column;gap:14px;">`;
     items.forEach((it, i)=>{
+      const priorGiven = sub && sub.answers ? sub.answers[it.id] : undefined;
+      const badge = sub ? gradeBadgeHtml(gradeItem(it, priorGiven)) : '';
       card += `<div class="field">`;
       if(it.type === 'mc'){
-        card += `<label style="margin-bottom:6px;">${i + 1}. ${escapeHtml(it.stem)}</label>`;
+        card += `<label style="margin-bottom:6px;">${i + 1}. ${escapeHtml(it.stem)}${badge}</label>`;
         (it.options || []).filter(o=> o).forEach(opt=>{
           const checked = draftAnswers[it.id] === opt ? 'checked' : '';
           card += `<label style="display:flex;align-items:center;gap:6px;font-weight:400;margin-bottom:4px;"><input type="radio" name="ws-${h.id}-${it.id}" class="ws-answer" data-item-id="${it.id}" value="${escapeHtml(opt)}" style="width:auto;" ${checked}> ${escapeHtml(opt)}</label>`;
         });
       }else if(it.type === 'blank'){
         const parts = (it.stem || '').split('{{blank}}');
-        card += `<label style="margin-bottom:6px;">${i + 1}.</label>
+        card += `<label style="margin-bottom:6px;">${i + 1}.${badge}</label>
           <div class="body-text" style="margin-top:0;">`;
         if(parts.length > 1){
           card += `${escapeHtml(parts[0])} <input type="text" class="ws-answer mono" data-item-id="${it.id}" value="${escapeHtml(draftAnswers[it.id] || '')}" style="display:inline-block;width:150px;vertical-align:baseline;"> ${escapeHtml(parts.slice(1).join(''))}`;
@@ -834,7 +864,7 @@ function renderWorksheetStudentCard(h){
         }
         card += `</div>`;
       }else{
-        card += `<label>${i + 1}. ${escapeHtml(it.stem)}</label>
+        card += `<label>${i + 1}. ${escapeHtml(it.stem)}${badge}</label>
           <textarea class="ws-answer" data-item-id="${it.id}" rows="2" placeholder="Your answer">${escapeHtml(draftAnswers[it.id] || '')}</textarea>`;
       }
       card += `</div>`;
@@ -934,7 +964,9 @@ function renderQuestionsStudentCard(h){
     </div>`;
 
   if(sub && !expanded){
-    card += `<div class="meta" style="margin-top:8px;">Answered ${answeredCount}/${questions.length} · last saved ${timeAgo(tsVal(sub.submittedAt))} (attempt ${sub.attemptCount || 1}${h.maxAttempts ? ` of ${h.maxAttempts}` : ''})</div>`;
+    const score = scoreSubmission(questions, sub.answers);
+    const scoreText = score.gradable > 0 ? ` · ${score.correct}/${score.gradable} correct` : '';
+    card += `<div class="meta" style="margin-top:8px;">Answered ${answeredCount}/${questions.length} · last saved ${timeAgo(tsVal(sub.submittedAt))} (attempt ${sub.attemptCount || 1}${h.maxAttempts ? ` of ${h.maxAttempts}` : ''})${scoreText}</div>`;
   }
 
   if(locked && !expanded){
@@ -953,8 +985,10 @@ function renderQuestionsStudentCard(h){
     }
     card += `<div style="margin-top:12px;display:flex;flex-direction:column;gap:10px;">`;
     questions.forEach((q, i)=>{
+      const priorGiven = sub && sub.answers ? sub.answers[q.id] : undefined;
+      const badge = sub ? gradeBadgeHtml(gradeItem(q, priorGiven)) : '';
       card += `<div class="field">
-        <label>${i + 1}. ${escapeHtml(q.text)}</label>
+        <label>${i + 1}. ${escapeHtml(q.text)}${badge}</label>
         <input type="text" class="gq-answer" data-qid="${q.id}" placeholder="Your answer" value="${escapeHtml(draftAnswers[q.id] || '')}">
       </div>`;
     });

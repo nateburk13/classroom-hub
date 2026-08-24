@@ -722,6 +722,17 @@ function scoreWorksheetSubmission(h, answers){
   });
   return { correct, gradable, total: items.length };
 }
+// Same auto-grading, applied to "list of questions" mode homework — each
+// question can optionally carry a correctAnswer set by the teacher.
+function scoreQuestionsSubmission(h, answers){
+  const questions = h.questions || [];
+  let correct = 0, gradable = 0;
+  questions.forEach(q=>{
+    const g = gradeWorksheetItem(q, answers && answers[q.id]);
+    if(g !== 'ungraded'){ gradable++; if(g === 'correct') correct++; }
+  });
+  return { correct, gradable, total: questions.length };
+}
 
 /* Writing tab: prompts are created inline (no popup) and each prompt's
    responses expand in place underneath it, so the teacher can read full
@@ -929,7 +940,9 @@ function wireGrammarTeacherView(category){
     function addQuestionRow(){
       const row = document.createElement('div');
       row.style.cssText = 'display:flex;gap:6px;margin-bottom:6px;';
-      row.innerHTML = `<input type="text" class="gr-question-input" placeholder="e.g. Circle the verb: The dog runs fast." style="flex:1;"><button type="button" class="btn small danger">✕</button>`;
+      row.innerHTML = `<input type="text" class="gr-question-input" placeholder="e.g. Circle the verb: The dog runs fast." style="flex:2;">
+        <input type="text" class="gr-question-answer" placeholder="Correct answer (optional)" style="flex:1;">
+        <button type="button" class="btn small danger">✕</button>`;
       row.querySelector('button').onclick = ()=> row.remove();
       qList.appendChild(row);
     }
@@ -1068,9 +1081,14 @@ function wireGrammarTeacherView(category){
       let questions = [];
       let wsItemsToSave = [];
       if(mode === 'questions'){
-        questions = Array.from(qList.querySelectorAll('.gr-question-input'))
-          .map(inp=> inp.value.trim()).filter(Boolean)
-          .map(text=> ({ id: newQuestionId(), text }));
+        const rows = Array.from(qList.children);
+        questions = rows
+          .map(row=>({
+            text: row.querySelector('.gr-question-input').value.trim(),
+            correctAnswer: row.querySelector('.gr-question-answer').value.trim()
+          }))
+          .filter(q=> q.text)
+          .map(q=> ({ id: newQuestionId(), text: q.text, correctAnswer: q.correctAnswer }));
         if(questions.length === 0){ err.textContent = 'Add at least one question, or switch to single prompt.'; return; }
       }
       if(mode === 'worksheet'){
@@ -1298,7 +1316,21 @@ async function toggleGrammarResponses(hwId){
     let body;
     let scoreLine = '';
     if(isQ){
-      body = `<ol style="margin:6px 0 0;padding-left:18px;">${(h.questions||[]).map(q=> `<li style="margin-bottom:4px;">${escapeHtml(q.text)}<br><span class="body-text">${escapeHtml((s.answers && s.answers[q.id]) || '(no answer)')}</span></li>`).join('')}</ol>`;
+      const score = scoreQuestionsSubmission(h, s.answers);
+      if(score.gradable > 0){
+        scoreLine = `<span class="meta" style="font-weight:700;color:${score.correct===score.gradable ? 'var(--green-ok)' : 'var(--forest)'};">${score.correct}/${score.gradable} correct</span>`;
+      }
+      body = `<ol style="margin:6px 0 0;padding-left:18px;">${(h.questions||[]).map(q=>{
+        const given = (s.answers && s.answers[q.id]) || '';
+        const grade = gradeWorksheetItem(q, given);
+        const badge = grade === 'correct'
+          ? `<span class="stamp submitted" style="margin-left:6px;">✓ correct</span>`
+          : grade === 'wrong'
+            ? `<span class="stamp overdue" style="margin-left:6px;">✗ incorrect</span>`
+            : '';
+        const correctNote = (grade === 'wrong' && q.correctAnswer) ? ` <span class="meta">(answer key: ${escapeHtml(q.correctAnswer)})</span>` : '';
+        return `<li style="margin-bottom:4px;">${escapeHtml(q.text)}<br><span class="body-text">${escapeHtml(given || '(no answer)')}</span>${badge}${correctNote}</li>`;
+      }).join('')}</ol>`;
     }else if(isWs){
       const score = scoreWorksheetSubmission(h, s.answers);
       if(score.gradable > 0){
