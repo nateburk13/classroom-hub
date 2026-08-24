@@ -655,7 +655,25 @@ function attemptsExhausted(h, sub){
    text itself, so a student can't peek at one blank's answer by comparing
    text on-screen. Items with no correctAnswer set are 'ungraded' and shown
    as neutral (the teacher is reviewing those by hand). */
-function normalizeAnswer(v){ return (v || '').toString().trim().toLowerCase().replace(/\s+/g,' '); }
+/* Auto-grading, mirrored from teacher.js so students see instant ✓/✗
+   feedback without waiting for the teacher to open the responses panel.
+   Only the correct/incorrect verdict is shown here — never the answer key
+   text itself, so a student can't peek at one blank's answer by comparing
+   text on-screen. Items with no correctAnswer set are 'ungraded' and shown
+   as neutral (the teacher is reviewing those by hand).
+   normalizeAnswer also folds "smart" typographic quotes (common in PDF
+   answer keys) to plain ones and trims a trailing period, so e.g. a
+   student typing mother's (straight ') still matches an answer key of
+   mother's (curly ’). */
+function normalizeAnswer(v){
+  return (v || '').toString()
+    .trim()
+    .toLowerCase()
+    .replace(/[\u2018\u2019\u0060\u00b4]/g, "'")
+    .replace(/[\u201c\u201d]/g, '"')
+    .replace(/\s+/g, ' ')
+    .replace(/[.\s]+$/, '');
+}
 function gradeItem(item, given){
   if(!item.correctAnswer) return 'ungraded';
   if(!given) return 'wrong';

@@ -709,7 +709,19 @@ function statusForHomework(h){
 // correctAnswer. Case/whitespace-insensitive; mc compares the chosen option
 // text directly. Items with no correctAnswer set are left "ungraded" rather
 // than counted wrong, since the teacher may not have filled one in.
-function normalizeAnswer(v){ return (v || '').toString().trim().toLowerCase().replace(/\s+/g,' '); }
+// Also normalizes "smart" typographic quotes to plain ones and trims common
+// trailing punctuation — PDFs (like the K5 worksheet answer keys) usually
+// encode apostrophes as ’ / ‘, but a student typing on a keyboard will type
+// a plain ', so "mother's" and "mother's" need to compare as equal.
+function normalizeAnswer(v){
+  return (v || '').toString()
+    .trim()
+    .toLowerCase()
+    .replace(/[\u2018\u2019\u0060\u00b4]/g, "'")   // ‘ ’ ` ´  →  '
+    .replace(/[\u201c\u201d]/g, '"')                 // “ ”      →  "
+    .replace(/\s+/g, ' ')
+    .replace(/[.\s]+$/, '');                         // trailing period(s)/space
+}
 function gradeWorksheetItem(item, given){
   if(!item.correctAnswer) return 'ungraded';
   if(!given) return 'wrong';
