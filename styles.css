@@ -434,3 +434,14 @@ a:focus-visible, button:focus-visible, input:focus-visible, textarea:focus-visib
   outline:3px solid #fff;
   box-shadow:0 0 0 5px var(--amber-dark);
 }
+/* ============================= SETTINGS (feature toggles) ============================= */
+.settings-row{display:flex;justify-content:space-between;align-items:center;gap:16px;padding:12px 0;border-bottom:0.5px solid var(--line);}
+.settings-row:last-child{border-bottom:none;}
+.settings-row-label{font-weight:600;font-size:13px;color:var(--forest);}
+.switch{position:relative;display:inline-block;width:40px;height:22px;flex-shrink:0;cursor:pointer;}
+.switch input{opacity:0;width:0;height:0;position:absolute;}
+.switch-track{position:absolute;inset:0;background:var(--line);border-radius:999px;transition:background 0.15s;}
+.switch-track::before{content:"";position:absolute;width:16px;height:16px;left:3px;top:3px;background:var(--paper);border-radius:50%;transition:transform 0.15s;box-shadow:0 1px 2px rgba(0,0,0,0.2);}
+.switch input:checked + .switch-track{background:var(--green-ok);}
+.switch input:checked + .switch-track::before{transform:translateX(18px);}
+.switch input:focus-visible + .switch-track{outline:2px solid var(--amber-dark);outline-offset:2px;}

@@ -103,6 +103,7 @@ function showCreateGate(fromSwitcher){
       const ref = await db.collection('classes').add({
         className, teacherName, code, passcodeHash,
         securityQuestion: secQuestion, securityAnswerHash,
+        features: { ...DEFAULT_FEATURES, homeworkCategories: { ...DEFAULT_FEATURES.homeworkCategories } },
         createdAt: firebase.firestore.FieldValue.serverTimestamp()
       });
       const doc = await ref.get();
@@ -254,7 +255,8 @@ function teardownListeners(){
   if(unsubBooks) unsubBooks();
   if(unsubHomework) unsubHomework();
   if(unsubPresence) unsubPresence();
-  unsubAssignments = unsubAnnouncements = unsubQuizzes = unsubBooks = unsubHomework = unsubPresence = null;
+  if(unsubClassInfo) unsubClassInfo();
+  unsubAssignments = unsubAnnouncements = unsubQuizzes = unsubBooks = unsubHomework = unsubPresence = unsubClassInfo = null;
   stopTeacherPresence();
   ClassroomCall.teardown();
   Whiteboard.teardown();
@@ -281,6 +283,7 @@ let books = [];
 let homework = [];
 let presence = [];
 let unsubPresence = null;
+let unsubClassInfo = null;
 let loaded = { assignments: false, announcements: false, quizzes: false, books: false, homework: false, students: false };
 // Homework tab: categories are a fixed field on each doc (not separate
 // collections) so the UI can filter client-side and adding a category later
@@ -299,6 +302,57 @@ const HOMEWORK_CATEGORIES = [
   { id:'speech', label:'Speech', style:'generic' }
 ];
 let currentHwCategory = 'grammar';
+
+/* --------------------------- FEATURES (teacher-controlled toggles) --------------------------- */
+// Teachers can turn whole tabs — and individual homework categories — on or
+// off per class, from the Settings tab below. Stored on the class doc itself
+// (`features`) so it live-syncs to every student device the same way
+// everything else in this app does. DEFAULT_FEATURES keeps classes created
+// before this existed fully enabled, with nothing missing/undefined.
+const DEFAULT_FEATURES = {
+  announcements: true,
+  homework: true,
+  quizzes: true,
+  books: true,
+  whiteboard: true,
+  calls: true,
+  homeworkCategories: { grammar: true, writing: true, vocab: true, spelling: true, speech: true }
+};
+function featuresOf(info){
+  const f = (info && info.features) || {};
+  return {
+    ...DEFAULT_FEATURES,
+    ...f,
+    homeworkCategories: { ...DEFAULT_FEATURES.homeworkCategories, ...(f.homeworkCategories || {}) }
+  };
+}
+function visibleHwCategories(){
+  const hc = featuresOf(classInfo).homeworkCategories;
+  const list = HOMEWORK_CATEGORIES.filter(c=> hc[c.id] !== false);
+  return list.length ? list : HOMEWORK_CATEGORIES; // never end up with zero tabs to show
+}
+// Shows/hides sidebar nav buttons per the current class's feature flags.
+// If the tab a device happens to be sitting on gets turned off remotely
+// (e.g. the teacher flips it from another device), bounce back to the dashboard.
+function applyFeatureVisibility(){
+  if(!classInfo) return;
+  const f = featuresOf(classInfo);
+  let bounced = false;
+  document.querySelectorAll('.nav-btn[data-feature]').forEach(btn=>{
+    const on = f[btn.dataset.feature] !== false;
+    btn.classList.toggle('hidden', !on);
+    if(!on && currentView === btn.dataset.view) bounced = true;
+  });
+  if(bounced) currentView = 'dashboard';
+}
+async function setFeature(key, on){
+  if(!classId) return;
+  await db.collection('classes').doc(classId).update({ [`features.${key}`]: on });
+}
+async function setHomeworkCategoryFeature(catId, on){
+  if(!classId) return;
+  await db.collection('classes').doc(classId).update({ [`features.homeworkCategories.${catId}`]: on });
+}
 // Inline "Writing" tab state (see renderWritingTeacherView): whether the new-
 // prompt form is open, and which prompts have their responses expanded.
 let showNewHwForm = false;
@@ -327,9 +381,19 @@ function startApp(id, info){
   document.getElementById('who-name').textContent = info.teacherName;
   document.getElementById('who-avatar').textContent = initials(info.teacherName);
   renderClassSwitcher();
+  applyFeatureVisibility();
   startTeacherPresence();
   ClassroomCall.init({ classId, myId: TEACHER_PRESENCE_ID, myName: info.teacherName, myRole: 'teacher' });
   Whiteboard.init({ classId, myId: TEACHER_PRESENCE_ID, myName: info.teacherName, myRole: 'teacher' });
+
+  // Keeps classInfo (and its `features` toggles) live — so flipping a switch
+  // in Settings on one device updates the sidebar/tabs everywhere instantly.
+  unsubClassInfo = db.collection('classes').doc(classId).onSnapshot((doc)=>{
+    if(!doc.exists) return;
+    classInfo = doc.data();
+    applyFeatureVisibility();
+    render();
+  });
 
   unsubAssignments = db.collection('classes').doc(classId).collection('assignments')
     .onSnapshot(async (snap)=>{
@@ -469,8 +533,9 @@ function renderClassSwitcher(){
 const viewRoot = document.getElementById('view-root');
 
 function render(){
+  applyFeatureVisibility();
   document.querySelectorAll('.nav-btn').forEach(b=> b.classList.toggle('active', b.dataset.view === currentView));
-  const renderers = { dashboard: renderDashboard, assignments: renderAssignments, announcements: renderAnnouncements, homework: renderHomework, quizzes: renderQuizzes, books: renderBooks, students: renderStudents, whiteboard: renderWhiteboard };
+  const renderers = { dashboard: renderDashboard, assignments: renderAssignments, announcements: renderAnnouncements, homework: renderHomework, quizzes: renderQuizzes, books: renderBooks, students: renderStudents, whiteboard: renderWhiteboard, settings: renderSettings };
   (renderers[currentView] || renderDashboard)();
 }
 
@@ -637,9 +702,11 @@ function renderAnnouncements(){
 
 function renderHomework(){
   setHeader('Homework', 'Create homework by category and track submissions.');
+  const cats = visibleHwCategories();
+  if(!cats.find(c=> c.id === currentHwCategory)) currentHwCategory = cats[0].id;
   const catMeta = HOMEWORK_CATEGORIES.find(c=> c.id === currentHwCategory);
   const activeLabel = catMeta.label;
-  let html = `<div class="pill-tabs">${HOMEWORK_CATEGORIES.map(c=> `<button class="pill-tab ${c.id===currentHwCategory?'active':''}" data-hw-cat="${c.id}">${c.label}</button>`).join('')}</div>`;
+  let html = `<div class="pill-tabs">${cats.map(c=> `<button class="pill-tab ${c.id===currentHwCategory?'active':''}" data-hw-cat="${c.id}">${c.label}</button>`).join('')}</div>`;
 
   if(!loaded.homework){
     html += `<div class="empty"><h3>Loading homework…</h3><p>Connecting to your class.</p></div>`;
@@ -1556,6 +1623,7 @@ function renderStudents(){
     return tsVal(b.lastSeen) - tsVal(a.lastSeen);
   });
   const onlineCount = sorted.filter(isOnline).length;
+  const callsOn = featuresOf(classInfo).calls;
 
   let html = `<p class="meta" style="margin-bottom:14px;">${onlineCount} of ${sorted.length} student${sorted.length===1?'':'s'} online now.</p>`;
   sorted.forEach(p=>{
@@ -1569,9 +1637,9 @@ function renderStudents(){
             <div class="meta">${online ? 'Online now' : `Last active ${timeAgo(tsVal(p.lastSeen))}`}</div>
           </div>
         </div>
-        <button class="btn small primary" data-call="${p.id}" data-name="${escapeHtml(p.studentName || 'this student')}" ${online ? '' : 'disabled'}>
+        ${callsOn ? `<button class="btn small primary" data-call="${p.id}" data-name="${escapeHtml(p.studentName || 'this student')}" ${online ? '' : 'disabled'}>
           Video call
-        </button>
+        </button>` : ''}
       </div>
     </div>`;
   });
@@ -1581,6 +1649,44 @@ function renderStudents(){
   });
 }
 
+
+function renderSettings(){
+  setHeader('Settings', 'Choose which tabs and homework categories your students can see.');
+  const f = featuresOf(classInfo);
+  const rows = [
+    { key:'announcements', label:'Announcements', desc:'Post updates for the whole class to see.' },
+    { key:'homework', label:'Homework', desc:'All homework categories (Grammar, Writing, Vocab, Spelling, Speech).' },
+    { key:'quizzes', label:'Quizzes', desc:'Auto-graded quizzes and results.' },
+    { key:'books', label:'Book', desc:'Shared reading material for the class.' },
+    { key:'whiteboard', label:'Whiteboard', desc:'Live shared drawing surface.' },
+    { key:'calls', label:'Calls', desc:'Lets students and teacher video/audio call each other from the Students tab.' }
+  ];
+  let html = `<div class="card"><h3 style="margin-bottom:4px;">Tabs</h3><p class="meta" style="margin:0 0 12px;">Turn a tab off to hide it for students right away — nothing already posted is deleted.</p>`;
+  rows.forEach(r=>{
+    html += `<div class="settings-row">
+      <div><div class="settings-row-label">${r.label}</div><div class="meta">${r.desc}</div></div>
+      <label class="switch"><input type="checkbox" data-feature-toggle="${r.key}" ${f[r.key] !== false ? 'checked' : ''}><span class="switch-track"></span></label>
+    </div>`;
+  });
+  html += `</div>`;
+
+  html += `<div class="card"><h3 style="margin-bottom:4px;">Homework categories</h3><p class="meta" style="margin:0 0 12px;">Only shown when the Homework tab above is on.</p>`;
+  HOMEWORK_CATEGORIES.forEach(c=>{
+    html += `<div class="settings-row">
+      <div class="settings-row-label">${c.label}</div>
+      <label class="switch"><input type="checkbox" data-hw-cat-toggle="${c.id}" ${f.homeworkCategories[c.id] !== false ? 'checked' : ''}><span class="switch-track"></span></label>
+    </div>`;
+  });
+  html += `</div>`;
+
+  viewRoot.innerHTML = html;
+  viewRoot.querySelectorAll('[data-feature-toggle]').forEach(cb=>{
+    cb.onchange = ()=> setFeature(cb.dataset.featureToggle, cb.checked);
+  });
+  viewRoot.querySelectorAll('[data-hw-cat-toggle]').forEach(cb=>{
+    cb.onchange = ()=> setHomeworkCategoryFeature(cb.dataset.hwCatToggle, cb.checked);
+  });
+}
 
 /* --------------------------- 4. ACTIONS --------------------------- */
 function statusFor(assignment){

@@ -109,7 +109,8 @@ function teardownListeners(){
   if(unsubQuizzes) unsubQuizzes();
   if(unsubBooks) unsubBooks();
   if(unsubHomework) unsubHomework();
-  unsubAssignments = unsubAnnouncements = unsubQuizzes = unsubBooks = unsubHomework = null;
+  if(unsubClassInfo) unsubClassInfo();
+  unsubAssignments = unsubAnnouncements = unsubQuizzes = unsubBooks = unsubHomework = unsubClassInfo = null;
   stopPresence();
   ClassroomCall.teardown();
   Whiteboard.teardown();
@@ -331,6 +332,43 @@ let selectedMcAnswer = {}; // "quizId-questionId" -> chosen option text (before 
 let homework = [];
 let myHwSubmissions = {}; // homeworkId -> { text, attachmentUrl, attemptCount, submittedAt } | null
 let currentHwCategory = 'grammar';
+
+/* --------------------------- FEATURES (teacher-controlled toggles) --------------------------- */
+// Mirrors teacher.js — the teacher's Settings tab writes these onto the class
+// doc, and the live classInfo listener below keeps this device in sync.
+const DEFAULT_FEATURES = {
+  announcements: true,
+  homework: true,
+  quizzes: true,
+  books: true,
+  whiteboard: true,
+  calls: true,
+  homeworkCategories: { grammar: true, writing: true, vocab: true, spelling: true, speech: true }
+};
+function featuresOf(info){
+  const f = (info && info.features) || {};
+  return {
+    ...DEFAULT_FEATURES,
+    ...f,
+    homeworkCategories: { ...DEFAULT_FEATURES.homeworkCategories, ...(f.homeworkCategories || {}) }
+  };
+}
+function visibleHwCategories(){
+  const hc = featuresOf(classInfo).homeworkCategories;
+  const list = HOMEWORK_CATEGORIES.filter(c=> hc[c.id] !== false);
+  return list.length ? list : HOMEWORK_CATEGORIES;
+}
+function applyFeatureVisibility(){
+  if(!classInfo) return;
+  const f = featuresOf(classInfo);
+  let bounced = false;
+  document.querySelectorAll('.nav-btn[data-feature]').forEach(btn=>{
+    const on = f[btn.dataset.feature] !== false;
+    btn.classList.toggle('hidden', !on);
+    if(!on && currentView === btn.dataset.view) bounced = true;
+  });
+  if(bounced) currentView = 'dashboard';
+}
 // Which writing prompts currently have their inline "write here" panel open.
 let hwExpanded = {};
 // Fixed set of categories — a field on each doc rather than separate
@@ -345,7 +383,7 @@ const HOMEWORK_CATEGORIES = [
   { id:'speech', label:'Speech', style:'generic' }
 ];
 let loaded = { assignments: false, announcements: false, quizzes: false, books: false, homework: false };
-let unsubAssignments = null, unsubAnnouncements = null, unsubQuizzes = null, unsubBooks = null, unsubHomework = null;
+let unsubAssignments = null, unsubAnnouncements = null, unsubQuizzes = null, unsubBooks = null, unsubHomework = null, unsubClassInfo = null;
 let presenceInterval = null;
 const PRESENCE_HEARTBEAT_MS = 25000; // how often we tell the teacher we're still here
 
@@ -374,10 +412,20 @@ function startApp(id, info, name){
   document.getElementById('who-name').textContent = studentName;
   document.getElementById('who-avatar').textContent = initials(studentName);
   renderClassSwitcher();
+  applyFeatureVisibility();
   startPresence();
   ClassroomCall.init({ classId, myId: studentDocId(), myName: studentName, myRole: 'student' });
   Whiteboard.init({ classId, myId: studentDocId(), myName: studentName, myRole: 'student' });
   listenForIncomingCalls();
+
+  // Live-syncs classInfo (including the teacher's Settings toggles) so tabs
+  // hide/show immediately if the teacher flips a switch mid-class.
+  unsubClassInfo = db.collection('classes').doc(classId).onSnapshot((doc)=>{
+    if(!doc.exists) return;
+    classInfo = doc.data();
+    applyFeatureVisibility();
+    render();
+  });
 
   unsubAssignments = db.collection('classes').doc(classId).collection('assignments')
     .onSnapshot(async (snap)=>{
@@ -485,6 +533,7 @@ function renderClassSwitcher(){
 const viewRoot = document.getElementById('view-root');
 
 function render(){
+  applyFeatureVisibility();
   document.querySelectorAll('.nav-btn').forEach(b=> b.classList.toggle('active', b.dataset.view === currentView));
   const renderers = { dashboard: renderDashboard, assignments: renderAssignments, announcements: renderAnnouncements, homework: renderHomework, quizzes: renderQuizzes, books: renderBooks, whiteboard: renderWhiteboard };
   (renderers[currentView] || renderDashboard)();
@@ -564,9 +613,11 @@ function renderAssignments(){
 
 function renderHomework(){
   setHeader('Homework', "Complete homework in each category — resubmit anytime before it's due.");
+  const cats = visibleHwCategories();
+  if(!cats.find(c=> c.id === currentHwCategory)) currentHwCategory = cats[0].id;
   const catMeta = HOMEWORK_CATEGORIES.find(c=> c.id === currentHwCategory);
   const activeLabel = catMeta.label;
-  let html = `<div class="pill-tabs">${HOMEWORK_CATEGORIES.map(c=> `<button class="pill-tab ${c.id===currentHwCategory?'active':''}" data-hw-cat="${c.id}">${c.label}</button>`).join('')}</div>`;
+  let html = `<div class="pill-tabs">${cats.map(c=> `<button class="pill-tab ${c.id===currentHwCategory?'active':''}" data-hw-cat="${c.id}">${c.label}</button>`).join('')}</div>`;
 
   if(!loaded.homework){
     html += `<div class="empty"><h3>Loading homework…</h3><p>Connecting to your class.</p></div>`;
