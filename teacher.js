@@ -396,7 +396,7 @@ function startApp(id, info){
     if(!doc.exists) return;
     classInfo = doc.data();
     applyFeatureVisibility();
-    render();
+    renderFromListener();
   });
 
   unsubAssignments = db.collection('classes').doc(classId).collection('assignments')
@@ -554,7 +554,7 @@ function render(){
 // from button handlers (opening/closing the form, posting it) are
 // untouched, so the "New homework" button still works normally.
 function renderFromListener(){
-  if(currentView === 'homework' && (showNewGrammarForm || showNewHwForm)) return;
+  if(currentView === 'homework' && (showNewGrammarForm || showNewHwForm || showNewSpellingForm)) return;
   render();
 }
 
