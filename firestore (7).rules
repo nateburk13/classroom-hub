@@ -4,7 +4,11 @@ service cloud.firestore {
     match /classes/{classId} {
       allow read: if true;
       allow create: if isValidClass(request.resource.data);
-      allow update, delete: if false; // class info is fixed once created
+      // Class info is otherwise fixed once created — the one exception is
+      // `features` (the teacher's Settings-tab tab/category toggles), which
+      // is the only field allowed to change on an update.
+      allow update: if isValidFeaturesOnlyUpdate(request.resource.data, resource.data);
+      allow delete: if false;
 
       match /assignments/{assignmentId} {
         allow read: if true;
@@ -151,6 +155,15 @@ service cloud.firestore {
         && data.className is string && data.className.size() > 0 && data.className.size() < 120
         && data.teacherName is string && data.teacherName.size() > 0 && data.teacherName.size() < 80
         && data.code is string && data.code.size() == 6;
+    }
+    // The Settings tab toggles individual boolean flags on `features`
+    // (and on `features.homeworkCategories`) via dot-path updates, so only
+    // that one top-level field may differ from the existing doc — everything
+    // else (className, teacherName, code, passcodeHash, etc.) stays locked.
+    function isValidFeaturesOnlyUpdate(next, prev) {
+      return next.diff(prev).affectedKeys().hasOnly(['features'])
+        && next.features is map
+        && (!('homeworkCategories' in next.features) || next.features.homeworkCategories is map);
     }
     function isValidAssignment(data) {
       return data.keys().hasAll(['title', 'instructions', 'dueDate', 'createdAt'])
