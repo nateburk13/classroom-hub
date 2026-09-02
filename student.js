@@ -379,7 +379,7 @@ const HOMEWORK_CATEGORIES = [
   { id:'grammar', label:'Grammar', style:'builder' },
   { id:'writing', label:'Writing', style:'writing' },
   { id:'vocab', label:'Vocab', style:'builder' },
-  { id:'spelling', label:'Spelling', style:'generic' },
+  { id:'spelling', label:'Spelling', style:'spelling' },
   { id:'speech', label:'Speech', style:'generic' }
 ];
 let loaded = { assignments: false, announcements: false, quizzes: false, books: false, homework: false };
@@ -655,6 +655,14 @@ function renderHomework(){
     return;
   }
 
+  if(catMeta.style === 'spelling'){
+    [...items].sort((a,b)=> (a.dueDate||'').localeCompare(b.dueDate||'')).forEach(h=>{ html += renderSpellingStudentCard(h); });
+    viewRoot.innerHTML = html;
+    wireHomeworkTabs();
+    wireSpellingStudentCards();
+    return;
+  }
+
   [...items].sort((a,b)=> (a.dueDate||'').localeCompare(b.dueDate||'')).forEach(h=>{
     const status = statusForHomework(h);
     const sub = myHwSubmissions[h.id];
@@ -866,6 +874,138 @@ function renderGrammarStudentCard(h){
   if(h.mode === 'questions') return renderQuestionsStudentCard(h);
   if(h.mode === 'worksheet') return renderWorksheetStudentCard(h);
   return renderWritingStudentCard(h);
+}
+
+/* Spelling tab: the teacher posts a word list; each word is read aloud with
+   the browser's built-in text-to-speech (tap 🔊 — replays anytime), then the
+   student types what they heard. Auto-graded instantly the same way
+   worksheet/question answers are (exact match, case/whitespace insensitive). */
+function scoreSpellingSubmission(words, answers){
+  let correct = 0;
+  (words || []).forEach(w=>{
+    const given = answers && answers[w.id];
+    if(given && normalizeAnswer(given) === normalizeAnswer(w.word)) correct++;
+  });
+  return { correct, total: (words || []).length };
+}
+// Plays the word, then (if the teacher added one) its example sentence, then
+// the word again — the classic "word, sentence, word" spelling-test cadence.
+function speakSpellingWord(word, sentence){
+  if(!('speechSynthesis' in window)){ alert("This browser doesn't support text-to-speech — try Chrome, Edge, or Safari."); return; }
+  window.speechSynthesis.cancel();
+  const say = (text, rate)=>{ const u = new SpeechSynthesisUtterance(text); u.rate = rate; window.speechSynthesis.speak(u); };
+  say(word, 0.85);
+  if(sentence){ say(sentence, 0.95); say(word, 0.85); }
+}
+
+function renderSpellingStudentCard(h){
+  const sub = myHwSubmissions[h.id];
+  const status = statusForHomework(h);
+  const overdue = h.dueDate && new Date(h.dueDate) < new Date(new Date().toDateString());
+  const expanded = !!hwExpanded[h.id];
+  const locked = attemptsExhausted(h, sub);
+  const words = h.words || [];
+
+  let card = `<div class="card">
+    <div class="card-row">
+      <div>
+        <h3>${escapeHtml(h.title)}</h3>
+        <div class="meta">${h.dueDate ? `Due ${h.dueDate}` : 'No due date'} · ${words.length} word${words.length===1?'':'s'}${h.maxAttempts ? ` · ${h.maxAttempts} attempt${h.maxAttempts===1?'':'s'} allowed` : ''}</div>
+        ${h.instructions ? `<p class="body-text">${escapeHtml(h.instructions)}</p>` : ''}
+      </div>
+      <span class="stamp ${status.cls}">${status.label}</span>
+    </div>`;
+
+  if(sub && !expanded){
+    const score = scoreSpellingSubmission(words, sub.answers);
+    card += `<div class="meta" style="margin-top:8px;">${score.correct}/${score.total} correct · last saved ${timeAgo(tsVal(sub.submittedAt))} (attempt ${sub.attemptCount || 1}${h.maxAttempts ? ` of ${h.maxAttempts}` : ''})</div>`;
+  }
+
+  if(locked && !expanded){
+    card += `<div class="meta" style="margin-top:6px;">You've used all your allowed attempts — your last answers are locked in.</div>`;
+  }else if(overdue && !expanded){
+    card += sub
+      ? `<div class="meta" style="margin-top:6px;">Due date passed — your last answers are locked in.</div>`
+      : `<div class="form-actions"><span class="meta">Due date passed — no longer accepting submissions.</span></div>`;
+  }else if(!expanded){
+    card += `<div class="form-actions"><button class="btn ${sub ? '' : 'primary'} small" data-hw-expand="${h.id}">${sub ? 'Try again' : 'Start spelling test'}</button></div>`;
+  }else{
+    const priorAnswers = (sub && sub.answers) || {};
+    card += `<div style="margin-top:12px;display:flex;flex-direction:column;gap:10px;">`;
+    words.forEach((w, i)=>{
+      const given = priorAnswers[w.id] || '';
+      const badge = sub ? gradeBadgeHtml(given && normalizeAnswer(given) === normalizeAnswer(w.word) ? 'correct' : (given ? 'wrong' : 'ungraded')) : '';
+      card += `<div class="field">
+        <label style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+          <span>Word ${i + 1}${badge}</span>
+          <button type="button" class="btn small" data-speak="${escapeHtml(w.word)}" data-sentence="${escapeHtml(w.sentence || '')}">🔊 Hear word</button>
+        </label>
+        <input type="text" class="sp-answer" data-wid="${w.id}" placeholder="Type what you hear" value="${escapeHtml(given)}" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+      </div>`;
+    });
+    card += `</div>
+    <div class="form-actions">
+      <button class="btn small" data-hw-collapse="${h.id}">Cancel</button>
+      <button class="btn primary small" data-hw-save-sp="${h.id}">${sub ? 'Update answers' : 'Submit answers'}</button>
+    </div>
+    <div class="gate-error" id="sp-error-${h.id}"></div>`;
+  }
+
+  card += `</div>`;
+  return card;
+}
+
+function wireSpellingStudentCards(){
+  viewRoot.querySelectorAll('[data-hw-expand]').forEach(b=> b.onclick = ()=>{ hwExpanded[b.dataset.hwExpand] = true; render(); });
+  viewRoot.querySelectorAll('[data-hw-collapse]').forEach(b=> b.onclick = ()=>{ hwExpanded[b.dataset.hwCollapse] = false; render(); });
+  viewRoot.querySelectorAll('[data-hw-save-sp]').forEach(b=> b.onclick = ()=> saveSpellingSubmission(b.dataset.hwSaveSp));
+  viewRoot.querySelectorAll('[data-speak]').forEach(b=> b.onclick = ()=> speakSpellingWord(b.dataset.speak, b.dataset.sentence));
+  // Debounced local draft save, same idea as the other homework types — only
+  // while there's no existing submission yet.
+  viewRoot.querySelectorAll('.sp-answer').forEach(inp=>{
+    inp.addEventListener('input', ()=>{
+      const card = inp.closest('.card');
+      const saveBtn = card.querySelector('[data-hw-save-sp]');
+      if(!saveBtn) return;
+      const hwId = saveBtn.dataset.hwSaveSp;
+      if(myHwSubmissions[hwId]) return;
+      clearTimeout(inp._draftTimer);
+      inp._draftTimer = setTimeout(()=>{
+        const answers = {};
+        card.querySelectorAll('.sp-answer').forEach(a=>{ answers[a.dataset.wid] = a.value; });
+        localStorage.setItem(draftKey(hwId), JSON.stringify(answers));
+      }, 500);
+    });
+  });
+}
+
+async function saveSpellingSubmission(hwId){
+  const h = homework.find(x=> x.id === hwId);
+  const existing = myHwSubmissions[hwId];
+  if(h && attemptsExhausted(h, existing)){ render(); return; }
+  const saveBtn = document.querySelector(`[data-hw-save-sp="${hwId}"]`);
+  const card = saveBtn.closest('.card');
+  const answers = {};
+  card.querySelectorAll('.sp-answer').forEach(inp=>{ answers[inp.dataset.wid] = inp.value.trim(); });
+  const err = document.getElementById('sp-error-' + hwId);
+  const hasAnyAnswer = Object.values(answers).some(v=> v);
+  if(!hasAnyAnswer){ err.textContent = 'Type at least one word before submitting.'; return; }
+  saveBtn.disabled = true; saveBtn.textContent = 'Saving…'; err.textContent = '';
+  try{
+    const attemptCount = (existing && existing.attemptCount ? existing.attemptCount : 0) + 1;
+    await db.collection('classes').doc(classId).collection('homework').doc(hwId)
+      .collection('submissions').doc(studentDocId()).set({
+        studentName, text: '', answers, attemptCount,
+        submittedAt: firebase.firestore.FieldValue.serverTimestamp()
+      });
+    localStorage.removeItem(draftKey(hwId));
+    myHwSubmissions[hwId] = { studentName, text: '', answers, attemptCount, submittedAt: { toMillis: ()=> Date.now() } };
+    hwExpanded[hwId] = false;
+    render();
+  }catch(e){
+    saveBtn.disabled = false; saveBtn.textContent = existing ? 'Update answers' : 'Submit answers';
+    err.textContent = e.message || "Couldn't save — check your connection and try again.";
+  }
 }
 
 /* Worksheet mode: items imported (and edited) by the teacher from a PDF.

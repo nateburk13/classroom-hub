@@ -293,15 +293,19 @@ let loaded = { assignments: false, announcements: false, quizzes: false, books: 
 // genuinely different layout).
 //   'builder' -> renderGrammarTeacherView / wireGrammarTeacherView (prompt / questions / worksheet-import)
 //   'writing' -> renderWritingTeacherView / wireWritingTeacherView (inline free response)
+//   'spelling' -> renderSpellingTeacherView / wireSpellingTeacherView (word list read aloud via text-to-speech)
 //   'generic' -> the plain popup-modal flow (openHomeworkModal)
 const HOMEWORK_CATEGORIES = [
   { id:'grammar', label:'Grammar', style:'builder' },
   { id:'writing', label:'Writing', style:'writing' },
   { id:'vocab', label:'Vocab', style:'builder' },
-  { id:'spelling', label:'Spelling', style:'generic' },
+  { id:'spelling', label:'Spelling', style:'spelling' },
   { id:'speech', label:'Speech', style:'generic' }
 ];
 let currentHwCategory = 'grammar';
+// Inline "Spelling" tab state (see renderSpellingTeacherView): whether the
+// new-word-list form is open. Results panels reuse hwResponsesExpanded above.
+let showNewSpellingForm = false;
 
 /* --------------------------- FEATURES (teacher-controlled toggles) --------------------------- */
 // Teachers can turn whole tabs — and individual homework categories — on or
@@ -733,6 +737,14 @@ function renderHomework(){
     return;
   }
 
+  if(catMeta.style === 'spelling'){
+    html += renderSpellingTeacherView(items);
+    viewRoot.innerHTML = html;
+    wireHomeworkTabs();
+    wireSpellingTeacherView();
+    return;
+  }
+
   html += `<div class="section-head"><div></div><button class="btn primary small" id="btn-new-homework">New ${activeLabel.toLowerCase()} homework</button></div>`;
   if(items.length === 0){
     html += `<div class="empty"><h3>No ${activeLabel.toLowerCase()} homework yet</h3><p>Create the first one for this category.</p></div>`;
@@ -938,6 +950,242 @@ async function toggleWritingResponses(hwId){
       <div style="display:flex;justify-content:space-between;gap:10px;"><strong style="font-size:13px;">${escapeHtml(s.studentName)}</strong><span class="meta">attempt ${s.attemptCount || 1} · ${timeAgo(tsVal(s.submittedAt))}</span></div>
       ${s.text ? `<p class="body-text" style="white-space:pre-wrap;margin-top:6px;">${escapeHtml(s.text)}</p>` : '<p class="meta" style="margin-top:6px;">(no typed text)</p>'}
       ${s.attachmentUrl ? `<a href="${s.attachmentUrl}" download="${escapeHtml(s.attachmentName || 'file')}" class="meta">📎 ${escapeHtml(s.attachmentName || 'attached file')}</a>` : ''}
+    </div>`;
+  });
+  html += '</div>';
+  container.innerHTML = html;
+}
+
+// ---- Spelling tab: teacher types/pastes a word list (one word per line,
+// optionally "word | example sentence"). Students hear each word read aloud
+// by the browser's built-in text-to-speech, then type what they heard —
+// auto-graded the same way worksheet/question answers are (exact match,
+// case/whitespace insensitive). Create-only, like Speech/Assignments —
+// delete + repost to change a list once it's posted. ----
+function parseSpellingWordList(raw){
+  return raw.split('\n').map(l=> l.trim()).filter(Boolean).map((line, i)=>{
+    const [word, sentence] = line.split('|').map(s=> (s || '').trim());
+    return { id: `w${i}`, word, sentence: sentence || null };
+  }).filter(w=> w.word);
+}
+// Import a word list from a file into the sp-words textarea (never posts
+// automatically — the teacher always reviews/reorders/edits the resulting
+// lines before saving, same "one word per line, optional | sentence" format
+// the textarea already accepts by hand).
+async function importSpellingWordFile(){
+  const fileInput = document.getElementById('sp-import-file');
+  const file = fileInput.files[0];
+  const status = document.getElementById('sp-import-status');
+  if(!file) return;
+  const ext = (file.name.split('.').pop() || '').toLowerCase();
+  status.textContent = 'Reading file…';
+  try{
+    let lines;
+    if(['xlsx','xls','csv'].includes(ext)) lines = await extractSpellingWordsFromSpreadsheet(file);
+    else if(ext === 'pdf') lines = await extractSpellingWordsFromPdf(file);
+    else if(['docx','doc'].includes(ext)) lines = await extractSpellingWordsFromDocx(file);
+    else lines = (await file.text()).split('\n');
+
+    lines = lines
+      .map(l=> l.replace(/^[\s\-•*\u2022]*\d*[.)]?\s*/, '').trim()) // strip leading numbering/bullets
+      .filter(Boolean);
+
+    if(lines.length === 0){
+      status.textContent = "Couldn't find any words in that file — try a different file, or type the list in manually.";
+      fileInput.value = '';
+      return;
+    }
+    const ta = document.getElementById('sp-words');
+    const existing = ta.value.trim();
+    ta.value = existing ? (existing + '\n' + lines.join('\n')) : lines.join('\n');
+    status.textContent = `Imported ${lines.length} line${lines.length === 1 ? '' : 's'} — review, reorder, or edit below before posting.`;
+  }catch(e){
+    status.textContent = "Could not read that file. Make sure it's a Word (.docx), PDF, Excel (.xlsx/.csv), or plain text file.";
+  }
+  fileInput.value = '';
+}
+// Reads column A as the word and column B (if present) as its example
+// sentence, row by row in the order they appear in the sheet.
+async function extractSpellingWordsFromSpreadsheet(file){
+  const buf = await file.arrayBuffer();
+  const wb = XLSX.read(buf, { type: 'array' });
+  const sheet = wb.Sheets[wb.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
+  return rows.map(row=>{
+    const word = (row[0] || '').toString().trim();
+    const sentence = (row[1] || '').toString().trim();
+    if(!word) return '';
+    return sentence ? `${word} | ${sentence}` : word;
+  });
+}
+async function extractSpellingWordsFromPdf(file){
+  const buf = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({
+    data: buf,
+    cMapUrl: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/cmaps/',
+    cMapPacked: true,
+    standardFontDataUrl: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/standard_fonts/',
+    stopAtErrors: false
+  }).promise;
+  let fullText = '';
+  const pagesToRead = Math.min(pdf.numPages, 20);
+  for(let i = 1; i <= pagesToRead; i++){
+    const page = await pdf.getPage(i);
+    const content = await page.getTextContent();
+    fullText += textItemsToLines(content.items) + '\n';
+  }
+  return fullText.split('\n');
+}
+async function extractSpellingWordsFromDocx(file){
+  const buf = await file.arrayBuffer();
+  const result = await mammoth.extractRawText({ arrayBuffer: buf });
+  return (result.value || '').split('\n');
+}
+function scoreSpellingSubmission(words, answers){
+  let correct = 0;
+  (words || []).forEach(w=>{
+    const given = answers && answers[w.id];
+    if(given && normalizeAnswer(given) === normalizeAnswer(w.word)) correct++;
+  });
+  return { correct, total: (words || []).length };
+}
+// Plays a word, then (if given) its example sentence, then the word again —
+// the classic "word, sentence, word" spelling-test cadence. Utterances queue
+// automatically without needing to chain onend callbacks.
+function speakSpellingWord(word, sentence){
+  if(!('speechSynthesis' in window)){ alert("This browser doesn't support text-to-speech — try Chrome, Edge, or Safari."); return; }
+  window.speechSynthesis.cancel();
+  const say = (text, rate)=>{ const u = new SpeechSynthesisUtterance(text); u.rate = rate; window.speechSynthesis.speak(u); };
+  say(word, 0.85);
+  if(sentence){ say(sentence, 0.95); say(word, 0.85); }
+}
+function previewSpellingList(words){
+  if(!words || words.length === 0) return;
+  if(!('speechSynthesis' in window)){ alert("This browser doesn't support text-to-speech — try Chrome, Edge, or Safari."); return; }
+  window.speechSynthesis.cancel();
+  words.forEach(w=> window.speechSynthesis.speak(new SpeechSynthesisUtterance(w.word)));
+}
+
+function renderSpellingTeacherView(items){
+  let html = `<div class="section-head"><div></div><button class="btn primary small" id="btn-toggle-spelling-form">${showNewSpellingForm ? 'Cancel' : 'New spelling list'}</button></div>`;
+
+  if(showNewSpellingForm){
+    html += `<div class="card">
+      <div class="field"><label>Title</label><input id="sp-title" placeholder="Week 4 spelling list"></div>
+      <div class="field"><label>Instructions (optional)</label><textarea id="sp-instr" rows="2" placeholder="Listen to each word, then type what you hear."></textarea></div>
+      <div class="field"><label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="sp-has-due" style="width:auto;" checked> Has a due date</label>
+        <input id="sp-due" type="date" value="${addDays(7)}">
+      </div>
+      <div class="field"><label>Resubmissions allowed</label><input id="sp-max-attempts" type="number" min="1" placeholder="Leave blank for unlimited"></div>
+      <div class="field"><label>Word list</label>
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;">
+          <button type="button" class="btn small" id="sp-import-btn">Import from Word / PDF / Excel / text file</button>
+          <input type="file" id="sp-import-file" accept=".docx,.doc,.pdf,.xlsx,.xls,.csv,.txt" class="hidden">
+          <span class="meta" id="sp-import-status"></span>
+        </div>
+        <textarea id="sp-words" rows="8" placeholder="cat&#10;dog | The dog ran fast.&#10;house"></textarea>
+        <p class="meta" style="margin-top:4px;">One word per line, in whatever order you want — add an optional example sentence after a pipe (|) and students hear the word, then the sentence, then the word again, like a real spelling test. Importing a file fills in this box for you (it never posts automatically), so review, reorder, or edit any line before posting.</p>
+      </div>
+      <div class="form-actions"><button class="btn small" id="sp-cancel">Cancel</button><button class="btn primary small" id="sp-save">Post spelling list</button></div>
+      <div class="gate-error" id="sp-error"></div>
+    </div>`;
+  }
+
+  if(items.length === 0){
+    html += `<div class="empty"><h3>No spelling lists yet</h3><p>Add a word list above to get started.</p></div>`;
+  }else{
+    [...items].sort((a,b)=> (a.dueDate||'').localeCompare(b.dueDate||'')).forEach(h=>{
+      const status = statusForHomework(h);
+      const words = h.words || [];
+      const expanded = !!hwResponsesExpanded[h.id];
+      html += `<div class="card">
+        <div class="card-row">
+          <div>
+            <h3>${escapeHtml(h.title)}</h3>
+            <div class="meta">${h.dueDate ? `Due ${h.dueDate} · ` : 'No due date · '}${words.length} word${words.length===1?'':'s'} · ${h.submissionCount} submitted${h.maxAttempts ? ` · ${h.maxAttempts} attempt${h.maxAttempts===1?'':'s'} allowed` : ''}</div>
+            ${h.instructions ? `<p class="body-text">${escapeHtml(h.instructions)}</p>` : ''}
+          </div>
+          <span class="stamp ${status.cls}">${status.label}</span>
+        </div>
+        <div class="form-actions">
+          <button class="btn small" data-sp-toggle="${h.id}">${expanded ? 'Hide results' : 'View results'}</button>
+          <button class="btn small" data-sp-preview="${h.id}">🔊 Preview words</button>
+          <button class="btn small danger" data-hw-delete="${h.id}">Delete</button>
+        </div>
+        <div id="sp-responses-${h.id}">${expanded ? '<p class="meta" style="margin-top:10px;">Loading…</p>' : ''}</div>
+      </div>`;
+    });
+  }
+  return html;
+}
+
+function wireSpellingTeacherView(){
+  document.getElementById('btn-toggle-spelling-form').onclick = ()=>{ showNewSpellingForm = !showNewSpellingForm; render(); };
+  if(showNewSpellingForm){
+    document.getElementById('sp-has-due').onchange = (e)=>{ document.getElementById('sp-due').disabled = !e.target.checked; };
+    document.getElementById('sp-cancel').onclick = ()=>{ showNewSpellingForm = false; render(); };
+    document.getElementById('sp-import-btn').onclick = ()=> document.getElementById('sp-import-file').click();
+    document.getElementById('sp-import-file').onchange = ()=> importSpellingWordFile();
+    document.getElementById('sp-save').onclick = async ()=>{
+      const title = document.getElementById('sp-title').value.trim();
+      const err = document.getElementById('sp-error');
+      const words = parseSpellingWordList(document.getElementById('sp-words').value);
+      if(!title){ err.textContent = 'Give the list a title.'; return; }
+      if(words.length === 0){ err.textContent = 'Add at least one word.'; return; }
+      const saveBtn = document.getElementById('sp-save');
+      saveBtn.disabled = true; saveBtn.textContent = 'Posting…'; err.textContent = '';
+      try{
+        const hasDue = document.getElementById('sp-has-due').checked;
+        const maxAttemptsRaw = parseInt(document.getElementById('sp-max-attempts').value, 10);
+        await db.collection('classes').doc(classId).collection('homework').add({
+          category: 'spelling',
+          title,
+          instructions: document.getElementById('sp-instr').value.trim(),
+          dueDate: hasDue ? (document.getElementById('sp-due').value || addDays(7)) : null,
+          maxAttempts: (Number.isFinite(maxAttemptsRaw) && maxAttemptsRaw > 0) ? maxAttemptsRaw : null,
+          words,
+          createdAt: firebase.firestore.FieldValue.serverTimestamp()
+        });
+        showNewSpellingForm = false;
+      }catch(e){
+        saveBtn.disabled = false; saveBtn.textContent = 'Post spelling list';
+        err.textContent = e.message || "Couldn't save — check your connection and try again.";
+      }
+    };
+  }
+  viewRoot.querySelectorAll('[data-sp-toggle]').forEach(b=> b.onclick = ()=> toggleSpellingResponses(b.dataset.spToggle));
+  viewRoot.querySelectorAll('[data-sp-preview]').forEach(b=> b.onclick = ()=>{
+    const h = homework.find(x=> x.id === b.dataset.spPreview);
+    if(h) previewSpellingList(h.words || []);
+  });
+  viewRoot.querySelectorAll('[data-hw-delete]').forEach(b=> b.onclick = ()=> deleteHomework(b.dataset.hwDelete));
+}
+
+async function toggleSpellingResponses(hwId){
+  const wasExpanded = !!hwResponsesExpanded[hwId];
+  hwResponsesExpanded[hwId] = !wasExpanded;
+  if(wasExpanded){ render(); return; }
+  render(); // shows the "Loading…" placeholder immediately
+  const h = homework.find(x=> x.id === hwId);
+  const words = (h && h.words) || [];
+  const subsSnap = await db.collection('classes').doc(classId).collection('homework').doc(hwId).collection('submissions').get();
+  const container = document.getElementById('sp-responses-' + hwId);
+  if(!container) return; // user switched tabs before this resolved
+  if(subsSnap.empty){ container.innerHTML = '<p class="meta" style="margin-top:10px;">No submissions yet.</p>'; return; }
+  const docs = [...subsSnap.docs].sort((a,b)=> (a.data().studentName || '').localeCompare(b.data().studentName || ''));
+  let html = '<div style="margin-top:10px;display:flex;flex-direction:column;gap:10px;">';
+  docs.forEach(d=>{
+    const s = d.data();
+    const score = scoreSpellingSubmission(words, s.answers);
+    html += `<div style="border-top:0.5px solid var(--line);padding-top:10px;">
+      <div style="display:flex;justify-content:space-between;gap:10px;"><strong style="font-size:13px;">${escapeHtml(s.studentName)}</strong><span class="meta">${score.correct}/${score.total} correct · attempt ${s.attemptCount || 1} · ${timeAgo(tsVal(s.submittedAt))}</span></div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;">
+        ${words.map(w=>{
+          const given = (s.answers && s.answers[w.id]) || '';
+          const ok = given && normalizeAnswer(given) === normalizeAnswer(w.word);
+          return `<span class="stamp ${ok ? 'submitted' : 'overdue'}" style="text-transform:none;">${escapeHtml(w.word)}: ${escapeHtml(given || '—')}</span>`;
+        }).join('')}
+      </div>
     </div>`;
   });
   html += '</div>';
