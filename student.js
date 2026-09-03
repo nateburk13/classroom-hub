@@ -547,8 +547,9 @@ function renderDashboard(){
   setHeader('Dashboard', `What's due and what's new in ${classInfo.className}.`);
   const upcoming = [...assignments].sort((a,b)=> (a.dueDate||'').localeCompare(b.dueDate||'')).slice(0,3);
   const recentAnnouncement = [...announcements].sort((a,b)=> tsVal(b.postedAt)-tsVal(a.postedAt))[0];
+  const announcementsOn = featuresOf(classInfo).announcements;
 
-  let html = `<div class="grid-2">`;
+  let html = `<div class="${announcementsOn ? 'grid-2' : ''}">`;
   html += `<div class="card"><h3>Upcoming assignments</h3>`;
   if(!loaded.assignments){ html += `<p class="meta">Loading…</p>`; }
   else if(upcoming.length === 0){ html += `<p class="meta">Nothing assigned yet.</p>`; }
@@ -563,15 +564,21 @@ function renderDashboard(){
   }
   html += `</div>`;
 
-  html += `<div class="card"><h3>Latest announcement</h3>`;
-  if(!loaded.announcements){ html += `<p class="meta">Loading…</p>`; }
-  else if(!recentAnnouncement){ html += `<p class="meta">No announcements yet.</p>`; }
-  else{
-    html += `<div style="font-weight:600;font-size:13px;">${escapeHtml(recentAnnouncement.title)}</div>
-      <p class="body-text">${escapeHtml(recentAnnouncement.body)}</p>
-      <div class="meta">${timeAgo(tsVal(recentAnnouncement.postedAt))}</div>`;
+  // Only shown when the teacher has the Announcements tab switched on in
+  // Settings — otherwise this dashboard preview would leak the content even
+  // with the tab itself hidden.
+  if(announcementsOn){
+    html += `<div class="card"><h3>Latest announcement</h3>`;
+    if(!loaded.announcements){ html += `<p class="meta">Loading…</p>`; }
+    else if(!recentAnnouncement){ html += `<p class="meta">No announcements yet.</p>`; }
+    else{
+      html += `<div style="font-weight:600;font-size:13px;">${escapeHtml(recentAnnouncement.title)}</div>
+        <p class="body-text">${escapeHtml(recentAnnouncement.body)}</p>
+        <div class="meta">${timeAgo(tsVal(recentAnnouncement.postedAt))}</div>`;
+    }
+    html += `</div>`;
   }
-  html += `</div></div>`;
+  html += `</div>`;
   viewRoot.innerHTML = html;
 }
 
