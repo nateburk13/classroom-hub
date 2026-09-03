@@ -299,8 +299,7 @@ const HOMEWORK_CATEGORIES = [
   { id:'grammar', label:'Grammar', style:'builder' },
   { id:'writing', label:'Writing', style:'writing' },
   { id:'vocab', label:'Vocab', style:'builder' },
-  { id:'spelling', label:'Spelling', style:'spelling' },
-  { id:'speech', label:'Speech', style:'generic' }
+  { id:'spelling', label:'Spelling', style:'spelling' }
 ];
 let currentHwCategory = 'grammar';
 // Inline "Spelling" tab state (see renderSpellingTeacherView): whether the
@@ -320,7 +319,7 @@ const DEFAULT_FEATURES = {
   books: true,
   whiteboard: true,
   calls: true,
-  homeworkCategories: { grammar: true, writing: true, vocab: true, spelling: true, speech: true }
+  homeworkCategories: { grammar: true, writing: true, vocab: true, spelling: true }
 };
 function featuresOf(info){
   const f = (info && info.features) || {};
@@ -1903,7 +1902,7 @@ function renderSettings(){
   const f = featuresOf(classInfo);
   const rows = [
     { key:'announcements', label:'Announcements', desc:'Post updates for the whole class to see.' },
-    { key:'homework', label:'Homework', desc:'All homework categories (Grammar, Writing, Vocab, Spelling, Speech).' },
+    { key:'homework', label:'Homework', desc:'All homework categories (Grammar, Writing, Vocab, Spelling).' },
     { key:'quizzes', label:'Quizzes', desc:'Auto-graded quizzes and results.' },
     { key:'books', label:'Book', desc:'Shared reading material for the class.' },
     { key:'whiteboard', label:'Whiteboard', desc:'Live shared drawing surface.' },

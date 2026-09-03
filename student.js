@@ -343,7 +343,7 @@ const DEFAULT_FEATURES = {
   books: true,
   whiteboard: true,
   calls: true,
-  homeworkCategories: { grammar: true, writing: true, vocab: true, spelling: true, speech: true }
+  homeworkCategories: { grammar: true, writing: true, vocab: true, spelling: true }
 };
 function featuresOf(info){
   const f = (info && info.features) || {};
@@ -379,8 +379,7 @@ const HOMEWORK_CATEGORIES = [
   { id:'grammar', label:'Grammar', style:'builder' },
   { id:'writing', label:'Writing', style:'writing' },
   { id:'vocab', label:'Vocab', style:'builder' },
-  { id:'spelling', label:'Spelling', style:'spelling' },
-  { id:'speech', label:'Speech', style:'generic' }
+  { id:'spelling', label:'Spelling', style:'spelling' }
 ];
 let loaded = { assignments: false, announcements: false, quizzes: false, books: false, homework: false };
 let unsubAssignments = null, unsubAnnouncements = null, unsubQuizzes = null, unsubBooks = null, unsubHomework = null, unsubClassInfo = null;
