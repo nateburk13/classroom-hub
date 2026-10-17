@@ -77,6 +77,11 @@
     if(hrs < 24) return `${hrs}h ago`;
     return `${Math.floor(hrs/24)}d ago`;
   }
+  // The board is a fixed 1600x900 surface drawn at whatever width the screen allows
+  // (phone, tablet, desktop). Font sizes are therefore expressed relative to the
+  // board's width (cqw) so text keeps the same proportions inside its box.
+  const SUPPORTS_CQ = !!(window.CSS && CSS.supports && CSS.supports('font-size', '1cqw'));
+  function fontCss(px){ return SUPPORTS_CQ ? ((px / CANVAS_W) * 100).toFixed(4) + 'cqw' : px + 'px'; }
   function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
   function boardsCol(){ return db.collection('classes').doc(ctx.classId).collection('whiteboards'); }
   function objectsCol(boardId){ return boardsCol().doc(boardId).collection('objects'); }
@@ -245,13 +250,22 @@
 
   // ------- live cursor presence -------
   const CURSOR_COLORS = ['#C1502E', '#2B6CB0', '#B87A1F', '#6B3FA0', '#3B6D40', '#B8336A'];
-  const CURSOR_WRITE_MS = 70;
-  const CURSOR_STALE_MS = 8000;
+  // Quota-friendly cursor sharing: every cursor write is also a read for every
+  // other person on the board, so writes are throttled hard. While someone is
+  // drawing/dragging we update ~4x/second; while just hovering, ~1x/second.
+  // Tiny movements are skipped, and the final resting position is always sent.
+  const CURSOR_ACTIVE_MS = 250;
+  const CURSOR_IDLE_MS = 1000;
+  const CURSOR_MIN_MOVE = 10;   // canvas units (board is 1600 wide)
+  const CURSOR_STALE_MS = 10000;
   let unsubCursors = null;
   let cursorCache = {};
   let cursorEls = {};
   let cursorLayerEl = null;
   let lastCursorWrite = 0;
+  let lastCursorPt = null;
+  let pendingCursorPt = null;
+  let cursorFlushTimer = null;
   let cursorSweepTimer = null;
   let wrapEl = null;
 
@@ -314,6 +328,7 @@
             ${opts.onCloseOverlay ? `<button class="btn small" id="wb-overlay-close">Close</button>` : ''}
           </div>
         </div>
+        <div class="wb-rotate-hint">Tip: turn your phone sideways for a bigger board.</div>
         <div class="wb-canvas-wrap" id="wb-wrap">
           <div id="wb-objects-layer" class="wb-objects-layer"></div>
           <svg id="wb-preview-layer" class="wb-preview-layer" viewBox="0 0 ${CANVAS_W} ${CANVAS_H}" preserveAspectRatio="none"></svg>
@@ -703,7 +718,7 @@
     }else if(obj.type === 'image'){
       content.innerHTML = `<img src="${obj.src}" draggable="false" class="wb-obj-img" alt="">`;
     }else if(obj.type === 'text'){
-      content.innerHTML = `<div class="wb-obj-text" style="font-family:${obj.fontFamily||FONT_FAMILIES[0].value};font-size:${obj.fontPx||24}px;font-weight:${obj.bold?700:600};font-style:${obj.italic?'italic':'normal'};color:${obj.color||'#1F3A2E'};">${sanitizeTextHtml(obj.html || '')}</div>`;
+      content.innerHTML = `<div class="wb-obj-text" style="font-family:${obj.fontFamily||FONT_FAMILIES[0].value};font-size:${fontCss(obj.fontPx||24)};font-weight:${obj.bold?700:600};font-style:${obj.italic?'italic':'normal'};color:${obj.color||'#1F3A2E'};">${sanitizeTextHtml(obj.html || '')}</div>`;
     }
   }
 
@@ -806,7 +821,7 @@
     if(!div) return;
     if(patch.color !== undefined) div.style.color = patch.color;
     if(patch.fontFamily !== undefined) div.style.fontFamily = patch.fontFamily;
-    if(patch.fontPx !== undefined) div.style.fontSize = patch.fontPx + 'px';
+    if(patch.fontPx !== undefined) div.style.fontSize = fontCss(patch.fontPx);
     if(patch.bold !== undefined) div.style.fontWeight = patch.bold ? '700' : '600';
     if(patch.italic !== undefined) div.style.fontStyle = patch.italic ? 'italic' : 'normal';
   }
@@ -1157,18 +1172,36 @@
   }
 
   /* --------------------------- live cursor presence --------------------------- */
-  function broadcastCursor(pt){
-    if(!activeBoardId) return;
-    const now = Date.now();
-    if(now - lastCursorWrite < CURSOR_WRITE_MS) return;
-    lastCursorWrite = now;
+  function writeCursor(pt){
+    if(!activeBoardId || !ctx) return;
+    lastCursorWrite = Date.now();
+    lastCursorPt = pt;
+    pendingCursorPt = null;
     cursorsCol(activeBoardId).doc(ctx.myId).set({
       name: ctx.myName, x: pt.x, y: pt.y, color: colorForUser(ctx.myId),
       updatedAt: firebase.firestore.FieldValue.serverTimestamp()
     }).catch(()=>{});
   }
+  function broadcastCursor(pt){
+    if(!activeBoardId || document.hidden) return;
+    if(lastCursorPt && Math.hypot(pt.x - lastCursorPt.x, pt.y - lastCursorPt.y) < CURSOR_MIN_MOVE) return;
+    const interval = (drawState || dragState) ? CURSOR_ACTIVE_MS : CURSOR_IDLE_MS;
+    const wait = interval - (Date.now() - lastCursorWrite);
+    if(wait <= 0){ writeCursor(pt); return; }
+    // Too soon: remember the latest position and send it once the interval is up.
+    pendingCursorPt = pt;
+    if(!cursorFlushTimer){
+      cursorFlushTimer = setTimeout(()=>{
+        cursorFlushTimer = null;
+        if(pendingCursorPt) writeCursor(pendingCursorPt);
+      }, wait);
+    }
+  }
   function clearMyCursor(){
-    if(!activeBoardId) return;
+    if(cursorFlushTimer){ clearTimeout(cursorFlushTimer); cursorFlushTimer = null; }
+    pendingCursorPt = null;
+    if(!activeBoardId || !ctx || !lastCursorPt) return; // never wrote one, nothing to delete
+    lastCursorPt = null;
     cursorsCol(activeBoardId).doc(ctx.myId).delete().catch(()=>{});
   }
   function watchCursors(boardId){

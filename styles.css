@@ -350,7 +350,7 @@ button.btn:disabled{opacity:0.4;cursor:not-allowed;}
 .wb-card-meta{font-size:11px;color:var(--slate);}
 .wb-card-delete{position:absolute;top:12px;right:12px;padding:4px 8px;font-size:11px;}
 
-.wb-editor{display:flex;flex-direction:column;gap:10px;height:calc(100vh - 220px);min-height:420px;}
+.wb-editor{display:flex;flex-direction:column;gap:10px;}
 .wb-toolbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:var(--paper);border:0.5px solid var(--line);border-radius:10px;padding:8px 12px;}
 .wb-title{font-family:'Roboto Slab',serif;font-weight:700;font-size:15px;cursor:pointer;padding:4px 8px;border-radius:6px;}
 .wb-title:hover{background:var(--cream);}
@@ -381,7 +381,7 @@ button.btn:disabled{opacity:0.4;cursor:not-allowed;}
 .wb-size-btn{width:28px;height:28px;border-radius:6px;border:0.5px solid var(--line);background:var(--paper);font-size:11px;font-weight:700;cursor:pointer;}
 .wb-size-active{background:var(--amber);border-color:var(--amber-dark);}
 
-.wb-canvas-wrap{position:relative;flex:1;border-radius:12px;overflow:hidden;border:0.5px solid var(--line);background:#fff;box-shadow:var(--shadow);cursor:crosshair;}
+.wb-canvas-wrap{position:relative;flex:none;width:100%;aspect-ratio:16/9;max-width:calc((100vh - 200px)*16/9);margin:0 auto;container-type:inline-size;border-radius:12px;overflow:hidden;border:0.5px solid var(--line);background:#fff;box-shadow:var(--shadow);cursor:crosshair;}
 .wb-canvas-wrap.wb-tool-select{cursor:default;}
 .wb-objects-layer{position:absolute;inset:0;width:100%;height:100%;}
 .wb-preview-layer{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;}
@@ -407,17 +407,16 @@ button.btn:disabled{opacity:0.4;cursor:not-allowed;}
 .wb-h-ne{right:-6px;top:-6px;cursor:nesw-resize;}
 .wb-h-sw{left:-6px;bottom:-6px;cursor:nesw-resize;}
 .wb-h-se{right:-6px;bottom:-6px;cursor:nwse-resize;}
-.wb-cursor{position:absolute;transform:translate(-50%,-50%);transition:left 60ms linear,top 60ms linear;}
+.wb-cursor{position:absolute;transform:translate(-50%,-50%);transition:left 250ms linear,top 250ms linear;}
 .wb-cursor-dot{width:10px;height:10px;border-radius:50%;border:2px solid #fff;box-shadow:0 1px 3px rgba(0,0,0,0.4);}
 .wb-cursor-label{position:absolute;left:10px;top:-6px;color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:5px;white-space:nowrap;box-shadow:0 1px 3px rgba(0,0,0,0.3);}
 
 /* -------- in-call whiteboard overlay -------- */
 .wb-overlay-bg{position:fixed;inset:0;background:rgba(31,58,46,0.55);display:flex;align-items:center;justify-content:center;z-index:220;padding:20px;}
 .wb-overlay-panel{background:var(--cream);border-radius:16px;padding:14px;width:min(1100px,94vw);height:min(760px,90vh);box-shadow:0 12px 40px rgba(0,0,0,0.35);}
-.wb-overlay-panel .wb-editor{height:100%;}
+.wb-overlay-panel .wb-editor{height:auto;}
 
 @media (max-width:640px){
-  .wb-editor{height:calc(100vh - 260px);}
   .wb-tools{margin-left:0;width:100%;justify-content:space-between;}
   .wb-overlay-panel{padding:8px;width:98vw;height:92vh;}
 }
@@ -445,3 +444,36 @@ a:focus-visible, button:focus-visible, input:focus-visible, textarea:focus-visib
 .switch input:checked + .switch-track{background:var(--green-ok);}
 .switch input:checked + .switch-track::before{transform:translateX(18px);}
 .switch input:focus-visible + .switch-track{outline:2px solid var(--amber-dark);outline-offset:2px;}
+/* ============================= WHITEBOARD: PHONE / TOUCH ============================= */
+/* The board keeps a fixed 16:9 shape at every size (so images and shapes are never
+   stretched), and text scales with the board width via container units. */
+.wb-rotate-hint{display:none;font-size:12px;color:var(--slate);text-align:center;}
+.wb-overlay-panel{overflow:auto;}
+.wb-overlay-panel .wb-canvas-wrap{max-width:calc((min(760px,90vh) - 150px)*16/9);}
+
+@media (max-width:640px){
+  .wb-toolbar{position:relative;gap:8px;}
+  .wb-dropdown-wrap{position:static;}
+  .wb-dropdown-panel{left:8px;right:8px;max-width:none;width:auto;}
+  .wb-symbol-grid{grid-template-columns:repeat(8,1fr);}
+  .wb-symbol-btn{width:100%;height:36px;}
+  .wb-canvas-wrap,.wb-overlay-panel .wb-canvas-wrap{max-width:100%;}
+}
+@media (max-width:640px) and (orientation:portrait){
+  .wb-rotate-hint{display:block;}
+}
+/* Landscape phones are short: let the page scroll instead of shrinking the board */
+@media (max-height:520px){
+  .wb-canvas-wrap,.wb-overlay-panel .wb-canvas-wrap{max-width:100%;}
+}
+/* Fingers need bigger targets than mice */
+@media (pointer:coarse){
+  .wb-swatch{width:30px;height:30px;}
+  .wb-size-btn{width:38px;height:38px;}
+  .wb-toolbar .btn.small{min-height:38px;}
+  .wb-obj-handle{width:22px;height:22px;border-radius:5px;}
+  .wb-h-nw{left:-11px;top:-11px;}
+  .wb-h-ne{right:-11px;top:-11px;}
+  .wb-h-sw{left:-11px;bottom:-11px;}
+  .wb-h-se{right:-11px;bottom:-11px;}
+}
