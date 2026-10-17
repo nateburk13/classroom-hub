@@ -401,13 +401,13 @@ button.btn:disabled{opacity:0.4;cursor:not-allowed;}
 .wb-obj-text ul,.wb-obj-text ol{margin:4px 0;padding-left:22px;}
 .wb-obj-text[contenteditable="true"]{cursor:text;box-shadow:0 0 0 2px var(--amber) inset;background:rgba(255,255,255,0.4);pointer-events:auto;user-select:text;}
 .wb-obj-selected{outline:1.5px dashed var(--amber-dark);z-index:999;}
-.wb-obj-handle{position:absolute;width:12px;height:12px;background:var(--amber);border:1.5px solid var(--forest);border-radius:3px;display:none;z-index:1000;}
+.wb-obj-handle{transform:scale(calc(1 / var(--wb-z,1)));position:absolute;width:12px;height:12px;background:var(--amber);border:1.5px solid var(--forest);border-radius:3px;display:none;z-index:1000;}
 .wb-obj-selected .wb-obj-handle{display:block;}
 .wb-h-nw{left:-6px;top:-6px;cursor:nwse-resize;}
 .wb-h-ne{right:-6px;top:-6px;cursor:nesw-resize;}
 .wb-h-sw{left:-6px;bottom:-6px;cursor:nesw-resize;}
 .wb-h-se{right:-6px;bottom:-6px;cursor:nwse-resize;}
-.wb-cursor{position:absolute;transform:translate(-50%,-50%);transition:left 250ms linear,top 250ms linear;}
+.wb-cursor{position:absolute;transform:translate(-50%,-50%) scale(calc(1 / var(--wb-z,1)));transition:left 250ms linear,top 250ms linear;}
 .wb-cursor-dot{width:10px;height:10px;border-radius:50%;border:2px solid #fff;box-shadow:0 1px 3px rgba(0,0,0,0.4);}
 .wb-cursor-label{position:absolute;left:10px;top:-6px;color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:5px;white-space:nowrap;box-shadow:0 1px 3px rgba(0,0,0,0.3);}
 
@@ -452,9 +452,9 @@ a:focus-visible, button:focus-visible, input:focus-visible, textarea:focus-visib
 .wb-overlay-panel .wb-canvas-wrap{max-width:calc((min(760px,90vh) - 150px)*16/9);}
 
 @media (max-width:640px){
-  .wb-toolbar{position:relative;gap:8px;}
-  .wb-dropdown-wrap{position:static;}
-  .wb-dropdown-panel{left:8px;right:8px;max-width:none;width:auto;}
+  .wb-toolbar{gap:8px;}
+  /* Menus (shapes / text / symbols) become a bottom sheet so they never cover the small board */
+  .wb-dropdown-panel{position:fixed;left:8px;right:8px;top:auto;bottom:calc(8px + env(safe-area-inset-bottom,0px));max-width:none;width:auto;max-height:50vh;overflow-y:auto;z-index:240;box-shadow:0 -4px 24px rgba(0,0,0,0.22);}
   .wb-symbol-grid{grid-template-columns:repeat(8,1fr);}
   .wb-symbol-btn{width:100%;height:36px;}
   .wb-canvas-wrap,.wb-overlay-panel .wb-canvas-wrap{max-width:100%;}
@@ -477,3 +477,12 @@ a:focus-visible, button:focus-visible, input:focus-visible, textarea:focus-visib
   .wb-h-sw{left:-11px;bottom:-11px;}
   .wb-h-se{right:-11px;bottom:-11px;}
 }
+
+/* ---- zoom & pan ---- */
+.wb-stage{position:absolute;inset:0;transform-origin:0 0;}
+.wb-canvas-wrap.wb-tool-pan{cursor:grab;}
+.wb-canvas-wrap.wb-tool-pan:active{cursor:grabbing;}
+.wb-zoom{display:flex;align-items:center;gap:4px;}
+.wb-zoom .btn{min-width:34px;}
+.wb-zoom #wb-zoom-reset{min-width:56px;}
+.wb-zoom .btn:disabled{opacity:0.4;cursor:default;}

@@ -59,6 +59,7 @@
     { label: 'Math',   items: ['+','\u2212','\u00D7','\u00F7','=','\u2260','%','\u00B0'] },
     { label: 'Misc',   items: ['\u2600','\u2601','\u2602','\u2603','\u26A1','\u2699','\u266A','\u263A'] }
   ];
+  const MIN_ZOOM = 1, MAX_ZOOM = 4;   // board zoom range (1 = the whole board fits the screen)
   const MIN_OBJ = 24;              // smallest a box can be dragged/resized to
   const IMAGE_MAX_PX = 1100;       // longest side, in raw pixels, before compression
   const IMAGE_MAX_BYTES = 900000;  // stay safely under Firestore's 1MiB doc cap
@@ -248,6 +249,16 @@
   let symbolPanelOutsideHandler = null;
   let fileInputEl = null;
 
+  // ------- zoom & pan (local to each person; never synced) -------
+  const view = { z: 1, x: 0, y: 0 }; // zoom factor + pan offset in on-screen pixels
+  let stageEl = null;                // scaled/translated wrapper around the three board layers
+  let zoomLabelEl = null;
+  let resizeObs = null;
+  const touchPts = new Map();        // pointerId -> {x,y} for fingers currently on the board
+  let pinch = null;                  // set while exactly two fingers are pinching/panning
+  let ignoreTouchUntilUp = false;    // after a pinch, ignore the leftover finger so it can't draw
+  let touchCreate = null;            // object a touch just created (undone if it turns into a pinch)
+
   // ------- live cursor presence -------
   const CURSOR_COLORS = ['#C1502E', '#2B6CB0', '#B87A1F', '#6B3FA0', '#3B6D40', '#B8336A'];
   // Quota-friendly cursor sharing: every cursor write is also a read for every
@@ -287,6 +298,7 @@
             <button class="btn small" id="wb-select" data-tool="select" title="Select / move / resize">\u2196 Select</button>
             <button class="btn small" id="wb-pen" data-tool="pen" title="Freehand pen">\u270F\uFE0F Pen</button>
             <button class="btn small" id="wb-eraser" data-tool="eraser" title="Click an item to delete it">\u{1F9FD} Eraser</button>
+            <button class="btn small" id="wb-pan" data-tool="pan" title="Pan: drag to move around when zoomed in">\u270B Pan</button>
 
             <div class="wb-swatches">${colorSwatches}</div>
             <div class="wb-sizes">${sizeButtons}</div>
@@ -320,6 +332,12 @@
 
             <button class="btn small" id="wb-image-btn" title="Insert an image">\u{1F5BC}\uFE0F Image</button>
 
+            <div class="wb-zoom" role="group" aria-label="Zoom">
+              <button class="btn small" id="wb-zoom-out" title="Zoom out" aria-label="Zoom out">&minus;</button>
+              <button class="btn small" id="wb-zoom-reset" title="Fit the whole board">100%</button>
+              <button class="btn small" id="wb-zoom-in" title="Zoom in" aria-label="Zoom in">+</button>
+            </div>
+
             <button class="btn small hidden" id="wb-front" title="Bring to front">\u2B06 Front</button>
             <button class="btn small danger hidden" id="wb-delete" title="Delete selected (Del)">Delete</button>
             <button class="btn small" id="wb-undo" title="Undo your last add (Ctrl/Cmd+Z)">\u21B6 Undo</button>
@@ -330,13 +348,16 @@
         </div>
         <div class="wb-rotate-hint">Tip: turn your phone sideways for a bigger board.</div>
         <div class="wb-canvas-wrap" id="wb-wrap">
+          <div class="wb-stage" id="wb-stage">
           <div id="wb-objects-layer" class="wb-objects-layer"></div>
           <svg id="wb-preview-layer" class="wb-preview-layer" viewBox="0 0 ${CANVAS_W} ${CANVAS_H}" preserveAspectRatio="none"></svg>
           <div id="wb-cursor-layer" class="wb-cursor-layer"></div>
+          </div>
         </div>
       </div>`;
 
     wrapEl = container.querySelector('#wb-wrap');
+    stageEl = container.querySelector('#wb-stage');
     objLayerEl = container.querySelector('#wb-objects-layer');
     previewLayerEl = container.querySelector('#wb-preview-layer');
     cursorLayerEl = container.querySelector('#wb-cursor-layer');
@@ -370,8 +391,14 @@
       };
     });
 
-    // ---- Select / Pen / Eraser ----
-    ['wb-select','wb-pen','wb-eraser'].forEach(id=>{
+    // ---- Zoom ----
+    zoomLabelEl = container.querySelector('#wb-zoom-reset');
+    container.querySelector('#wb-zoom-in').onclick = ()=> zoomStep(1.5);
+    container.querySelector('#wb-zoom-out').onclick = ()=> zoomStep(1 / 1.5);
+    zoomLabelEl.onclick = ()=>{ resetView(); applyView(); };
+
+    // ---- Select / Pan / Pen / Eraser ----
+    ['wb-select','wb-pan','wb-pen','wb-eraser'].forEach(id=>{
       const b = container.querySelector('#'+id);
       b.onclick = ()=>{ setTool(b.dataset.tool, container); };
     });
@@ -478,6 +505,7 @@
     if(overlayCloseBtn) overlayCloseBtn.onclick = ()=>{ if(opts.onCloseOverlay) opts.onCloseOverlay(); };
 
     wireCanvasPointerEvents();
+    applyView();
     syncToolButtons(container);
     renderSelectionUI();
     loadBoard(boardId);
@@ -492,10 +520,13 @@
   }
 
   function syncToolButtons(container){
-    container.querySelectorAll('#wb-select,#wb-pen,#wb-eraser').forEach(b=> b.classList.toggle('cc-ctrl-active', b.dataset.tool === currentTool));
+    container.querySelectorAll('#wb-select,#wb-pan,#wb-pen,#wb-eraser').forEach(b=> b.classList.toggle('cc-ctrl-active', b.dataset.tool === currentTool));
     container.querySelectorAll('[data-color]').forEach(b=> b.classList.toggle('wb-swatch-active', b.dataset.color === currentColor));
     container.querySelectorAll('[data-size]').forEach(b=> b.classList.toggle('wb-size-active', Number(b.dataset.size) === currentSize));
-    if(wrapEl) wrapEl.classList.toggle('wb-tool-select', currentTool === 'select');
+    if(wrapEl){
+      wrapEl.classList.toggle('wb-tool-select', currentTool === 'select');
+      wrapEl.classList.toggle('wb-tool-pan', currentTool === 'pan');
+    }
     const shapesToggle = container.querySelector('#wb-shapes-toggle');
     if(shapesToggle) shapesToggle.classList.toggle('cc-ctrl-active', SHAPE_TOOLS.includes(currentTool));
     const textToggle = container.querySelector('#wb-text-toggle');
@@ -828,7 +859,7 @@
 
   /* --------------------------- pointer interaction --------------------------- */
   function canvasPoint(e){
-    const rect = wrapEl.getBoundingClientRect();
+    const rect = stageEl.getBoundingClientRect(); // includes zoom/pan, so mapping stays exact
     const x = (e.clientX - rect.left) / rect.width * CANVAS_W;
     const y = (e.clientY - rect.top) / rect.height * CANVAS_H;
     return { x: clamp(x, 0, CANVAS_W), y: clamp(y, 0, CANVAS_H) };
@@ -840,14 +871,33 @@
     wrapEl.addEventListener('pointermove', onCanvasPointerMove);
     ['pointerup','pointercancel'].forEach(evt=> wrapEl.addEventListener(evt, onCanvasPointerUp));
     wrapEl.addEventListener('pointerleave', ()=> clearMyCursor());
+    // Capture phase so finger tracking sees every touch, even ones an object handles itself.
+    wrapEl.addEventListener('pointerdown', onTouchTrackDown, true);
+    wrapEl.addEventListener('pointermove', onTouchTrackMove, true);
+    ['pointerup','pointercancel'].forEach(evt=> wrapEl.addEventListener(evt, onTouchTrackUp, true));
+    wrapEl.addEventListener('wheel', onBoardWheel, { passive: false });
+    // Focusing a text box while zoomed can make the browser scroll the clipped board; undo that.
+    wrapEl.addEventListener('scroll', ()=>{ wrapEl.scrollTop = 0; wrapEl.scrollLeft = 0; });
+    if(typeof ResizeObserver !== 'undefined'){
+      resizeObs = new ResizeObserver(()=> applyView());
+      resizeObs.observe(wrapEl);
+    }
   }
 
   function onCanvasPointerDown(e){
-    if(e.target.closest('.wb-obj')) return; // handled by the object itself
+    // Select and Eraser are handled by the object itself. Every other tool (pen, text, shapes,
+    // symbols, pan) must also work when the touch starts ON an object, e.g. writing on an image.
+    if((currentTool === 'select' || currentTool === 'eraser') && e.target.closest('.wb-obj')) return;
     const pt = canvasPoint(e);
     if(editingId) stopEditingText(editingId);
 
     if(currentTool === 'select'){ selectObject(null); return; }
+
+    if(currentTool === 'pan'){
+      wrapEl.setPointerCapture(e.pointerId);
+      drawState = { kind: 'pan', sx: e.clientX, sy: e.clientY, vx: view.x, vy: view.y };
+      return;
+    }
 
     if(currentTool === 'pen'){
       wrapEl.setPointerCapture(e.pointerId);
@@ -870,6 +920,7 @@
       const id = createObject({ type: 'text', x, y, w, h, html: '<div><br></div>',
         color: currentColor, fontFamily: currentFontFamily, fontPx: currentFontSize,
         bold: currentBold, italic: currentItalic });
+      noteTouchCreate(e, id, 'text');
       selectObject(id);
       setToolQuiet('select');
       requestAnimationFrame(()=> startEditingText(id));
@@ -878,8 +929,9 @@
     if(currentTool === 'symbol'){
       const size = 64;
       const x = clamp(pt.x - size/2, 0, CANVAS_W - size), y = clamp(pt.y - size/2, 0, CANVAS_H - size);
-      createObject({ type: 'text', x, y, w: size, h: size, html: `<div style="text-align:center;">${esc(currentSymbol)}</div>`,
+      const symId = createObject({ type: 'text', x, y, w: size, h: size, html: `<div style="text-align:center;">${esc(currentSymbol)}</div>`,
         color: currentColor, fontFamily: FONT_FAMILIES[0].value, fontPx: 40, bold: false, italic: false });
+      noteTouchCreate(e, symId, 'symbol');
       return;
     }
   }
@@ -888,6 +940,12 @@
     const pt = canvasPoint(e);
     broadcastCursor(pt);
     if(!drawState) return;
+    if(drawState.kind === 'pan'){
+      view.x = drawState.vx + (e.clientX - drawState.sx);
+      view.y = drawState.vy + (e.clientY - drawState.sy);
+      applyView();
+      return;
+    }
     if(drawState.kind === 'pen'){
       drawState.points.push(pt);
       drawPreviewPath(drawState.points);
@@ -1023,6 +1081,139 @@
       })).catch(reportWriteError);
     }
     dragState = null;
+  }
+
+  /* --------------------------- zoom & pan --------------------------- */
+  // The three board layers live inside a "stage" that is scaled/translated with CSS.
+  // canvasPoint() measures against the stage's own on-screen rectangle, so drawing,
+  // dragging and shared cursors stay exactly right at every zoom level.
+  function resetView(){ view.z = 1; view.x = 0; view.y = 0; }
+
+  function applyView(){
+    if(!wrapEl || !stageEl) return;
+    const W = wrapEl.clientWidth, H = wrapEl.clientHeight;
+    view.z = clamp(view.z, MIN_ZOOM, MAX_ZOOM);
+    if(view.z < 1.02) view.z = 1;                       // snap back to "fit"
+    view.x = clamp(view.x, W - W * view.z, 0);          // never pan past the board's edges
+    view.y = clamp(view.y, H - H * view.z, 0);
+    stageEl.style.transform = view.z === 1 ? 'none' : `translate(${view.x}px, ${view.y}px) scale(${view.z})`;
+    stageEl.style.setProperty('--wb-z', String(view.z)); // lets cursors/handles stay a constant size
+    wrapEl.classList.toggle('wb-zoomed', view.z > 1);
+    if(zoomLabelEl) zoomLabelEl.textContent = Math.round(view.z * 100) + '%';
+    const editor = wrapEl.closest('.wb-editor');
+    if(editor){
+      const zin = editor.querySelector('#wb-zoom-in'), zout = editor.querySelector('#wb-zoom-out');
+      if(zin) zin.disabled = view.z >= MAX_ZOOM;
+      if(zout) zout.disabled = view.z <= MIN_ZOOM;
+    }
+  }
+
+  // Zoom so the board point under (clientX, clientY) stays under that same screen point.
+  function zoomAt(nextZoom, clientX, clientY){
+    if(!wrapEl) return;
+    const r = wrapEl.getBoundingClientRect();
+    const px = clientX - r.left, py = clientY - r.top;
+    const cx = (px - view.x) / view.z, cy = (py - view.y) / view.z;
+    view.z = clamp(nextZoom, MIN_ZOOM, MAX_ZOOM);
+    view.x = px - cx * view.z;
+    view.y = py - cy * view.z;
+    applyView();
+  }
+  function zoomStep(factor){
+    if(!wrapEl) return;
+    const r = wrapEl.getBoundingClientRect();
+    zoomAt(view.z * factor, r.left + r.width / 2, r.top + r.height / 2);
+  }
+
+  // Ctrl/Cmd + wheel (and trackpad pinch, which browsers report the same way) zooms;
+  // a plain wheel only pans, and only while zoomed in, so normal page scrolling still works.
+  function onBoardWheel(e){
+    const dy = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+    const dx = e.deltaMode === 1 ? e.deltaX * 16 : e.deltaX;
+    if(e.ctrlKey || e.metaKey){
+      e.preventDefault();
+      zoomAt(view.z * Math.exp(-clamp(dy, -50, 50) * 0.01), e.clientX, e.clientY);
+    }else if(view.z > 1){
+      e.preventDefault();
+      view.x -= dx; view.y -= dy;
+      applyView();
+    }
+  }
+
+  // Cancels whatever one finger had started (a stroke, a shape, a drag) when a second
+  // finger lands, so a pinch never leaves a stray mark or moves an object.
+  function abortInteraction(){
+    if(drawState){ drawState = null; if(previewLayerEl) previewLayerEl.innerHTML = ''; }
+    if(dragState){
+      const node = objectEls[dragState.id], obj = objectCache[dragState.id];
+      if(node){
+        node.removeEventListener('pointermove', onObjectPointerMove);
+        node.removeEventListener('pointerup', onObjectPointerUp);
+        node.removeEventListener('pointercancel', onObjectPointerUp);
+      }
+      if(obj && node){
+        Object.assign(obj, dragState.orig);
+        positionObjectNode(node, obj);
+        if(obj.type === 'path' || obj.type === 'shape') refreshObjectContent(node, obj);
+      }
+      dragState = null;
+    }
+    if(touchCreate && Date.now() - touchCreate.t < 700 && objectCache[touchCreate.id]){
+      const i = myCreateStack.lastIndexOf(touchCreate.id);
+      if(i > -1){ myCreateStack.splice(i, 1); updateUndoButton(); }
+      removeObject(touchCreate.id);
+      setToolQuiet(touchCreate.prevTool);
+    }
+    touchCreate = null;
+  }
+  function noteTouchCreate(e, id, prevTool){
+    touchCreate = (e.pointerType === 'touch' && id) ? { id, t: Date.now(), prevTool } : null;
+  }
+
+  function beginPinch(){
+    const [a, b] = [...touchPts.values()];
+    const r = wrapEl.getBoundingClientRect();
+    const mid = { x: (a.x + b.x) / 2 - r.left, y: (a.y + b.y) / 2 - r.top };
+    pinch = {
+      dist: Math.hypot(a.x - b.x, a.y - b.y) || 1,
+      zoom: view.z,
+      anchor: { x: (mid.x - view.x) / view.z, y: (mid.y - view.y) / view.z } // board point between the fingers
+    };
+  }
+
+  function onTouchTrackDown(e){
+    if(e.pointerType !== 'touch') return;
+    touchPts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if(touchPts.size === 2){
+      e.stopPropagation();
+      abortInteraction();
+      beginPinch();
+    }else if(touchPts.size > 2 || ignoreTouchUntilUp){
+      e.stopPropagation();
+    }
+  }
+  function onTouchTrackMove(e){
+    if(e.pointerType !== 'touch' || !touchPts.has(e.pointerId)) return;
+    touchPts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if(pinch && touchPts.size === 2){
+      e.stopPropagation();
+      const [a, b] = [...touchPts.values()];
+      const r = wrapEl.getBoundingClientRect();
+      const mid = { x: (a.x + b.x) / 2 - r.left, y: (a.y + b.y) / 2 - r.top };
+      view.z = clamp(pinch.zoom * (Math.hypot(a.x - b.x, a.y - b.y) / pinch.dist), MIN_ZOOM, MAX_ZOOM);
+      // keep the board point that started between the fingers between them: this is pinch AND two-finger pan
+      view.x = mid.x - pinch.anchor.x * view.z;
+      view.y = mid.y - pinch.anchor.y * view.z;
+      applyView();
+    }else if(ignoreTouchUntilUp || touchPts.size > 2){
+      e.stopPropagation();
+    }
+  }
+  function onTouchTrackUp(e){
+    if(e.pointerType !== 'touch') return;
+    touchPts.delete(e.pointerId);
+    if(pinch && touchPts.size < 2){ pinch = null; ignoreTouchUntilUp = touchPts.size > 0; }
+    if(touchPts.size === 0) ignoreTouchUntilUp = false;
   }
 
   /* --------------------------- images --------------------------- */
@@ -1256,6 +1447,9 @@
     objectCache = {}; objectEls = {}; cursorCache = {}; cursorEls = {};
     selectedId = null; editingId = null; dragState = null; drawState = null;
     myCreateStack = [];
+    if(resizeObs){ resizeObs.disconnect(); resizeObs = null; }
+    resetView(); touchPts.clear(); pinch = null; ignoreTouchUntilUp = false; touchCreate = null;
+    stageEl = zoomLabelEl = null;
     objLayerEl = previewLayerEl = cursorLayerEl = wrapEl = null;
     undoBtn = deleteBtn = frontBtn = fileInputEl = null;
   }
